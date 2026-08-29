@@ -1,0 +1,14 @@
+dev/homeassistant/.storage/
+dev/homeassistant/.HA_VERSION
+dev/homeassistant/.ha_run.lock
+dev/homeassistant/blueprints/
+dev/homeassistant/home-assistant.log*
+dev/homeassistant/home-assistant_v2.db*
+dev/homeassistant/qemu_*.core
+dev/homeassistant/secrets.yaml
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+.venv-benchmark/

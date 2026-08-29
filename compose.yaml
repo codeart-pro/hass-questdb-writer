@@ -1,0 +1,25 @@
+services:
+  questdb:
+    image: docker.io/questdb/questdb:10.0.1
+    ports:
+      - "19000:9000"
+      - "19009:9009"
+      - "19003:9003"
+    volumes:
+      - questdb-data:/var/lib/questdb
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:2026.7.2
+    depends_on:
+      - questdb
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      TZ: Europe/Paris
+    ports:
+      - "18123:8123"
+    volumes:
+      - ./dev/homeassistant:/config
+      - ./custom_components/hass_questdb_writer:/config/custom_components/hass_questdb_writer:ro
+
+volumes:
+  questdb-data:
