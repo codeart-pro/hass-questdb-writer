@@ -117,6 +117,17 @@ Negative:
   identical ILP rows with the same `(last_updated, entity_id)` key collapse to
   one row; a later row with the same key replaces the value (upsert); the row
   count stays one.
+- Schema ownership on the same bench: `CREATE TABLE IF NOT EXISTS` is a silent
+  no-op on an existing table, so validation always follows creation;
+  `SHOW COLUMNS` truthfully reports the `designated` flag and the dedup
+  `upsertKey` flags for DDL-created tables, and the integration validates
+  against exactly those; an ILP field whose name collides with the designated
+  column is rejected by QuestDB, so `last_updated` is sent only as the row
+  timestamp, never as a named field.
+- `ALTER TABLE ... DEDUP ENABLE UPSERT KEYS` works on a WAL table, but
+  `SHOW COLUMNS` does not reliably report the upsert keys afterwards; the
+  integration therefore owns table creation and validation and does not
+  auto-repair existing tables.
 
 ## Required verification before production
 

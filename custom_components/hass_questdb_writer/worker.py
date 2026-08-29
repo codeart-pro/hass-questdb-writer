@@ -23,6 +23,7 @@ from typing import Protocol
 
 from .event import EventEnvelope, EventEnvelopeError
 from .ilp import IlpEncodingError
+from .schema import SchemaError, SchemaMismatchError
 from .spool import (
     DeadLetterFullError,
     NewSpoolEvent,
@@ -85,6 +86,14 @@ class TransportHandle(Protocol):
     """Operations used by the worker-owned transport."""
 
     def send_batch(self, payload: bytes) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class SchemaHandle(Protocol):
+    """Operations used by the worker-owned schema manager."""
+
+    def ensure(self, table: str) -> None: ...
 
     def close(self) -> None: ...
 
@@ -276,6 +285,7 @@ class WriterService:
         settings: WorkerSettings,
         spool_factory: Callable[[], SpoolHandle],
         transport_factory: Callable[[], TransportHandle],
+        schema_factory: Callable[[], SchemaHandle] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         wall_time_ns: Callable[[], int] = time.time_ns,
         random_source: Callable[[], float] = random.random,
@@ -289,6 +299,7 @@ class WriterService:
         self._settings = settings
         self._spool_factory = spool_factory
         self._transport_factory = transport_factory
+        self._schema_factory = schema_factory
         self._monotonic = monotonic
         self._wall_time_ns = wall_time_ns
         self._random_source = random_source
@@ -463,10 +474,14 @@ class WriterService:
     def _run(self) -> None:
         spool: SpoolHandle | None = None
         transport: TransportHandle | None = None
+        schema: SchemaHandle | None = None
         failed = False
         try:
             spool = self._spool_factory()
             transport = self._transport_factory()
+            schema = (
+                self._schema_factory() if self._schema_factory is not None else None
+            )
             self._set_spool_stats(spool.stats())
             with self._lock:
                 if self._stop_requested.is_set():
@@ -476,7 +491,7 @@ class WriterService:
                     self._state = WorkerState.RUNNING
                     self._accepting = True
             self._ready.set()
-            asyncio.run(self._async_main(spool, transport))
+            asyncio.run(self._async_main(spool, transport, schema))
         except BaseException as exc:
             failed = True
             with self._lock:
@@ -487,7 +502,7 @@ class WriterService:
         finally:
             self._ready.set()
             cleanup_error: BaseException | None = None
-            for resource in (transport, spool):
+            for resource in (transport, spool, schema):
                 if resource is None:
                     continue
                 try:
@@ -564,7 +579,10 @@ class WriterService:
             await asyncio.gather(*waiters, return_exceptions=True)
 
     async def _async_main(
-        self, spool: SpoolHandle, transport: TransportHandle
+        self,
+        spool: SpoolHandle,
+        transport: TransportHandle,
+        schema: SchemaHandle | None,
     ) -> None:
         """Run the persist and delivery coroutines until stop is requested."""
         self._loop = asyncio.get_running_loop()
@@ -572,7 +590,7 @@ class WriterService:
             self._stop_async.set()
         persist_task = asyncio.create_task(self._persist_loop(spool))
         deliver_task = asyncio.create_task(
-            self._delivery_loop(spool, transport)
+            self._delivery_loop(spool, transport, schema)
         )
         stop_waiter = asyncio.create_task(self._stop_async.wait())
         done, _ = await asyncio.wait(
@@ -592,7 +610,7 @@ class WriterService:
         await persist_task
         if self._settings.flush_on_shutdown:
             stats = spool.stats()
-            if stats.pending_rows:
+            if stats.pending_rows and await self._schema_is_ready(schema):
                 backoff = _Backoff(self._settings, self._random_source)
                 await self._deliver_once(
                     spool, transport, isolate_next=False, backoff=backoff
@@ -648,17 +666,34 @@ class WriterService:
             )
 
     async def _delivery_loop(
-        self, spool: SpoolHandle, transport: TransportHandle
+        self,
+        spool: SpoolHandle,
+        transport: TransportHandle,
+        schema: SchemaHandle | None,
     ) -> None:
-        """Deliver pending spool rows without blocking the persist path."""
+        """Deliver pending spool rows without blocking the persist path.
+
+        Delivery is gated on the owned table schema: the first batch is sent
+        only after the schema manager created and validated the table, so
+        QuestDB's implicit ILP table creation can never silently produce a
+        table without the declared dedup keys.
+        """
         pending_since: float | None = None
         retry_at: float | None = None
         blocked = False
         isolate_next = False
+        schema_ready = schema is None
         backoff = _Backoff(self._settings, self._random_source)
         while True:
             if self._stop_async.is_set():
                 return
+            if not schema_ready:
+                if schema is None:
+                    schema_ready = True
+                elif await self._ensure_schema(schema, backoff):
+                    schema_ready = True
+                else:
+                    continue
             now = self._monotonic()
             stats = spool.stats()
             self._set_spool_stats(stats)
@@ -728,6 +763,67 @@ class WriterService:
             await self._wait_events(
                 [self._wake_deliver, self._stop_async], delay
             )
+
+    async def _schema_is_ready(self, schema: SchemaHandle | None) -> bool:
+        """Return True when schema is not gated or is confirmed ready."""
+        if schema is None:
+            return True
+        try:
+            await asyncio.to_thread(schema.ensure, self._table)
+        except (IlpTransportError, SchemaError) as exc:
+            _LOGGER.warning(
+                "Skipped shutdown flush: schema check failed: %s",
+                _error_text(exc),
+            )
+            return False
+        return True
+
+    async def _ensure_schema(
+        self, schema: SchemaHandle, backoff: _Backoff
+    ) -> bool:
+        """Create/validate the owned table, or wait before retrying.
+
+        Permanent failures (schema mismatch, auth, rejected DDL) enter the
+        blocked state and re-check when new events arrive or a bounded period
+        passes, so a table fixed in place is picked up without a reload.
+        Retryable failures wait out one backoff step. Returns True only after
+        validation passed.
+        """
+        try:
+            await asyncio.to_thread(schema.ensure, self._table)
+        except (SchemaMismatchError, PermanentIlpError) as exc:
+            self._set_delivery_state(
+                WorkerState.BLOCKED,
+                last_error=_error_text(exc),
+                retry_delay=None,
+            )
+            self._wake_deliver.clear()
+            await self._wait_events(
+                [self._wake_deliver, self._stop_async],
+                self._settings.retry_max_seconds,
+            )
+            return False
+        except RetryableIlpError as exc:
+            delay = backoff.next_delay()
+            with self._lock:
+                self._retry_attempts += 1
+            self._set_delivery_state(
+                WorkerState.RETRY_WAIT,
+                last_error=_error_text(exc),
+                retry_delay=delay,
+            )
+            self._wake_deliver.clear()
+            await self._wait_events(
+                [self._wake_deliver, self._stop_async], delay
+            )
+            return False
+        backoff.reset()
+        self._set_delivery_state(
+            WorkerState.RUNNING,
+            last_error=None,
+            retry_delay=None,
+        )
+        return True
 
     def _build_batch(
         self,

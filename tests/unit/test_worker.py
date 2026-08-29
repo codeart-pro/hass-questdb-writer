@@ -11,6 +11,7 @@ import time
 import unittest
 
 from custom_components.hass_questdb_writer.event import EventEnvelope
+from custom_components.hass_questdb_writer.schema import SchemaMismatchError
 from custom_components.hass_questdb_writer.spool import (
     NewSpoolEvent,
     SQLiteSpool,
@@ -44,6 +45,23 @@ class ScriptedTransport:
             outcome = self._outcomes.pop(0) if self._outcomes else None
         if outcome is not None:
             raise outcome
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ScriptedSchema:
+    """A schema handle that fails until the test clears its error."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.ensure_error: BaseException | None = None
+        self.closed = False
+
+    def ensure(self, table: str) -> None:
+        self.calls += 1
+        if self.ensure_error is not None:
+            raise self.ensure_error
 
     def close(self) -> None:
         self.closed = True
@@ -132,7 +150,6 @@ class WriterServiceTests(unittest.TestCase):
             entity_id=f"sensor.test_{index}",
             state=str(index),
             attributes_json="{}",
-            timestamp_ns=timestamp,
             ingested_at_ns=timestamp + 100,
             last_changed_ns=timestamp,
             last_updated_ns=timestamp,
@@ -145,12 +162,14 @@ class WriterServiceTests(unittest.TestCase):
         *,
         settings: WorkerSettings | None = None,
         spool_factory: Callable[[], object] | None = None,
+        schema_factory: Callable[[], ScriptedSchema] | None = None,
     ) -> WriterService:
         service = WriterService(
             table="ha_events",
             settings=settings or self.settings(),
             spool_factory=spool_factory or self.open_spool,
             transport_factory=lambda: transport,
+            schema_factory=schema_factory,
             random_source=lambda: 0.5,
         )
         self.services.append(service)
@@ -373,6 +392,87 @@ class WriterServiceTests(unittest.TestCase):
         )
         service.start(timeout_seconds=1)
         service.submit(self.event(1))
+        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertEqual(service.snapshot().delivered_events, 1)
+        self.assertEqual(len(transport.payloads), 1)
+
+    def test_schema_gate_delays_delivery_until_schema_is_ready(self) -> None:
+        transport = ScriptedTransport()
+        schema = ScriptedSchema()
+        schema.ensure_error = RetryableIlpError(
+            "QuestDB exec request failed: ConnectionRefusedError",
+            retryable=True,
+            delivery_uncertain=False,
+        )
+        service = self.service(transport, schema_factory=lambda: schema)
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: schema.calls >= 2)
+        self.assertEqual(transport.payloads, [])
+        self.assertEqual(service.snapshot().state, WorkerState.RETRY_WAIT)
+        with self.open_spool() as spool:
+            self.assertEqual(spool.stats().pending_rows, 1)
+        schema.ensure_error = None
+        self.wait_for(lambda: service.snapshot().delivered_events == 1)
+        self.assertEqual(len(transport.payloads), 1)
+        self.assertTrue(service.stop(timeout_seconds=1))
+
+    def test_schema_mismatch_blocks_delivery_but_keeps_accepting(self) -> None:
+        transport = ScriptedTransport()
+        schema = ScriptedSchema()
+        schema.ensure_error = SchemaMismatchError(
+            "table ha_events does not match the owned schema: "
+            "missing columns: state"
+        )
+        service = self.service(transport, schema_factory=lambda: schema)
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        self.assertEqual(transport.payloads, [])
+        snapshot = service.snapshot()
+        self.assertTrue(snapshot.accepting)
+        self.assertIn("does not match the owned schema", snapshot.last_error or "")
+        self.assertTrue(service.submit(self.event(2)))
+        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertEqual(transport.payloads, [])
+
+    def test_shutdown_flush_skipped_when_schema_not_ready(self) -> None:
+        transport = ScriptedTransport()
+        schema = ScriptedSchema()
+        schema.ensure_error = RetryableIlpError(
+            "QuestDB exec request failed: ConnectionRefusedError",
+            retryable=True,
+            delivery_uncertain=False,
+        )
+        service = self.service(
+            transport,
+            settings=self.settings(
+                flush_interval_seconds=10,
+                flush_on_shutdown=True,
+            ),
+            schema_factory=lambda: schema,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertEqual(service.snapshot().delivered_events, 0)
+        self.assertEqual(transport.payloads, [])
+        with self.open_spool() as spool:
+            self.assertEqual(spool.stats().pending_rows, 1)
+
+    def test_shutdown_flush_delivers_after_schema_ready(self) -> None:
+        transport = ScriptedTransport()
+        schema = ScriptedSchema()
+        service = self.service(
+            transport,
+            settings=self.settings(
+                flush_interval_seconds=10,
+                flush_on_shutdown=True,
+            ),
+            schema_factory=lambda: schema,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
         self.assertTrue(service.stop(timeout_seconds=1))
         self.assertEqual(service.snapshot().delivered_events, 1)
         self.assertEqual(len(transport.payloads), 1)

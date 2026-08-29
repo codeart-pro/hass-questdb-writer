@@ -13,7 +13,7 @@ import time
 from typing import Final
 from uuid import uuid4
 
-from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNKNOWN
 from homeassistant.core import (
     CALLBACK_TYPE,
     Event,
@@ -25,6 +25,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.json import json_dumps
 
 from .event import EventEnvelope, EventEnvelopeError
+from .schema import IlpSchemaManager
 from .spool import SQLiteSpool
 from .transport import IlpHttpTransport
 from .worker import WorkerSettings, WorkerSnapshot, WriterService
@@ -100,6 +101,7 @@ class RuntimeSnapshot:
     state_events_seen: int
     state_events_accepted: int
     state_events_without_new_state: int
+    state_events_skipped_unknown: int
     conversion_errors: int
     submission_rejections: int
     worker: WorkerSnapshot
@@ -144,6 +146,7 @@ class HassQuestDbRuntime:
         self._events_seen = 0
         self._events_accepted = 0
         self._events_without_new_state = 0
+        self._events_skipped_unknown = 0
         self._conversion_errors = 0
         self._submission_rejections = 0
 
@@ -177,11 +180,22 @@ class HassQuestDbRuntime:
                 password=configuration.connection.password,
             )
 
+        def schema_factory() -> IlpSchemaManager:
+            return IlpSchemaManager(
+                configuration.connection.host,
+                configuration.connection.port,
+                use_tls=configuration.connection.use_tls,
+                timeout_seconds=configuration.connection.timeout_seconds,
+                username=configuration.connection.username,
+                password=configuration.connection.password,
+            )
+
         return WriterService(
             table=configuration.table,
             settings=configuration.worker,
             spool_factory=spool_factory,
             transport_factory=transport_factory,
+            schema_factory=schema_factory,
         )
 
     async def async_start(self) -> None:
@@ -251,13 +265,15 @@ class HassQuestDbRuntime:
         if new_state is None:
             self._events_without_new_state += 1
             return
+        if new_state.state == STATE_UNKNOWN:
+            self._events_skipped_unknown += 1
+            return
         try:
             envelope = EventEnvelope(
                 event_id=self._event_id_factory(),
                 entity_id=new_state.entity_id,
                 state=new_state.state,
                 attributes_json=json_dumps(dict(new_state.attributes)),
-                timestamp_ns=datetime_to_epoch_ns(event.time_fired),
                 ingested_at_ns=self._wall_time_ns(),
                 last_changed_ns=datetime_to_epoch_ns(new_state.last_changed),
                 last_updated_ns=datetime_to_epoch_ns(new_state.last_updated),
@@ -293,6 +309,7 @@ class HassQuestDbRuntime:
             state_events_seen=self._events_seen,
             state_events_accepted=self._events_accepted,
             state_events_without_new_state=self._events_without_new_state,
+            state_events_skipped_unknown=self._events_skipped_unknown,
             conversion_errors=self._conversion_errors,
             submission_rejections=self._submission_rejections,
             worker=self._service.snapshot(),

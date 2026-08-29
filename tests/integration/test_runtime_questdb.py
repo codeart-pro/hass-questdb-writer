@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -29,6 +30,7 @@ from custom_components.hass_questdb_writer.runtime import (
     RuntimeConfiguration,
     SpoolConfiguration,
 )
+from custom_components.hass_questdb_writer.schema import validate_table_columns
 from custom_components.hass_questdb_writer.worker import WorkerSettings, WorkerState
 
 
@@ -44,6 +46,13 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ) as response:
             return json.load(response)
 
+    def sql_maybe(self, statement: str) -> dict | None:
+        """Run a statement, treating a missing-table rejection as None."""
+        try:
+            return self.sql(statement)
+        except urllib.error.HTTPError:
+            return None
+
     async def asyncSetUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addAsyncCleanup(self._cleanup_temporary_directory)
@@ -52,14 +61,9 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
             component_source,
             target_is_directory=True,
         )
+        # The table is owned by the integration: the runtime's schema manager
+        # creates and validates it when the worker starts.
         self.sql(f"drop table if exists {self.table}")
-        self.sql(
-            f"create table {self.table} ("
-            "entity_id symbol, domain symbol, event_id varchar, state varchar, "
-            "attributes varchar, ingested_at timestamp, last_changed timestamp, "
-            "last_updated timestamp, context_id varchar, timestamp timestamp"
-            ") timestamp(timestamp) partition by day wal"
-        )
         self.addAsyncCleanup(self._drop_table)
         self.hass = HomeAssistant(self.temporary_directory.name)
         loader.async_setup(self.hass)
@@ -128,14 +132,15 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         deadline = time.monotonic() + 5
         while True:
-            result = self.sql(
+            result = self.sql_maybe(
                 f"select entity_id, domain, state, attributes "
                 f"from {self.table}"
             )
-            if result["count"] == 1 or time.monotonic() >= deadline:
+            if (result or {}).get("count") == 1 or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(0.01)
 
+        assert result is not None
         self.assertEqual(result["count"], 1)
         row = result["dataset"][0]
         self.assertEqual(row[0], "input_boolean.questdb_test")
@@ -149,6 +154,12 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.state_events_seen, 1)
         self.assertEqual(snapshot.state_events_accepted, 1)
         self.assertEqual(snapshot.worker.delivered_events, 1)
+        self.assertEqual(snapshot.worker.state, WorkerState.RUNNING)
+
+        # The worker owns the table: it created it with the declared
+        # designated timestamp and dedup upsert keys.
+        columns = self.sql(f"SHOW COLUMNS FROM {self.table}")
+        validate_table_columns(columns["dataset"], self.table)
 
     async def test_config_flow_setup_reload_event_and_unload(self) -> None:
         form = await self.hass.config_entries.flow.async_init(
@@ -178,14 +189,15 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         deadline = time.monotonic() + 5
         while True:
-            result = self.sql(
+            result = self.sql_maybe(
                 f"select entity_id, state from {self.table} "
                 "where entity_id = 'input_boolean.questdb_test'"
             )
-            if result["count"] == 1 or time.monotonic() >= deadline:
+            if (result or {}).get("count") == 1 or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(0.01)
 
+        assert result is not None
         self.assertEqual(
             result["dataset"],
             [["input_boolean.questdb_test", "on"]],
@@ -206,14 +218,15 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         deadline = time.monotonic() + 5
         while True:
-            result = self.sql(
+            result = self.sql_maybe(
                 f"select entity_id, state from {self.table} "
                 "where entity_id = 'input_boolean.questdb_test' "
-                "order by timestamp"
+                "order by last_updated"
             )
-            if result["count"] >= 2 or time.monotonic() >= deadline:
+            if ((result or {}).get("count") or 0) >= 2 or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(0.01)
+        assert result is not None
         self.assertEqual(
             result["dataset"],
             [

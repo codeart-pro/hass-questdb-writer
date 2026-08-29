@@ -9,7 +9,7 @@ from typing import Final, Self
 from .ilp import IlpTimestampMicros, encode_row
 from .spool import NewSpoolEvent
 
-EVENT_PAYLOAD_VERSION: Final = 1
+EVENT_PAYLOAD_VERSION: Final = 2
 _SIGNED_64_MAX: Final = 2**63 - 1
 
 
@@ -46,7 +46,6 @@ class EventEnvelope:
     entity_id: str
     state: str
     attributes_json: str
-    timestamp_ns: int
     ingested_at_ns: int
     last_changed_ns: int
     last_updated_ns: int
@@ -68,7 +67,6 @@ class EventEnvelope:
             raise EventEnvelopeError("attributes_json is not valid JSON") from exc
         if not isinstance(attributes, dict):
             raise EventEnvelopeError("attributes_json must contain a JSON object")
-        _timestamp_ns("timestamp_ns", self.timestamp_ns)
         _timestamp_ns("ingested_at_ns", self.ingested_at_ns)
         _timestamp_ns("last_changed_ns", self.last_changed_ns)
         _timestamp_ns("last_updated_ns", self.last_updated_ns)
@@ -120,7 +118,13 @@ class EventEnvelope:
         )
 
     def to_ilp(self, table: str) -> bytes:
-        """Encode this event as one QuestDB ILP row."""
+        """Encode this event as one QuestDB ILP row.
+
+        The HA `last_updated` timestamp is the designated timestamp (ADR-0005)
+        and doubles as the first part of the dedup key, so it must not be sent
+        as a named field: QuestDB rejects a field that collides with the
+        designated column.
+        """
         return encode_row(
             table,
             symbols={"entity_id": self.entity_id, "domain": self.domain},
@@ -132,10 +136,7 @@ class EventEnvelope:
                 "last_changed": IlpTimestampMicros(
                     self.last_changed_ns // 1_000
                 ),
-                "last_updated": IlpTimestampMicros(
-                    self.last_updated_ns // 1_000
-                ),
                 "context_id": self.context_id,
             },
-            timestamp_ns=self.timestamp_ns,
+            timestamp_ns=self.last_updated_ns,
         )

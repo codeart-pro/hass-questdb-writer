@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 
 from custom_components.hass_questdb_writer.event import EventEnvelope
+from custom_components.hass_questdb_writer.schema import IlpSchemaManager
 from custom_components.hass_questdb_writer.spool import SQLiteSpool
 from custom_components.hass_questdb_writer.transport import IlpHttpTransport
 from custom_components.hass_questdb_writer.worker import (
@@ -33,18 +34,23 @@ def proxy_handler(
     class QuestDbProxyHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
-        def do_POST(self) -> None:
+        def _forward(self, method: str) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
             connection = http.client.HTTPConnection(
                 upstream_host, upstream_port, timeout=5
             )
             try:
+                headers = (
+                    {"Content-Type": "text/plain; charset=utf-8"}
+                    if method == "POST"
+                    else {}
+                )
                 connection.request(
-                    "POST",
+                    method,
                     self.path,
-                    body=body,
-                    headers={"Content-Type": "text/plain; charset=utf-8"},
+                    body=body or None,
+                    headers=headers,
                 )
                 response = connection.getresponse()
                 response_body = response.read()
@@ -54,6 +60,12 @@ def proxy_handler(
             self.send_header("Content-Length", str(len(response_body)))
             self.end_headers()
             self.wfile.write(response_body)
+
+        def do_POST(self) -> None:
+            self._forward("POST")
+
+        def do_GET(self) -> None:
+            self._forward("GET")
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -77,14 +89,9 @@ class WorkerQuestDbIntegrationTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.spool_path = Path(self.temporary_directory.name) / "worker.db"
+        # The table is owned by the integration: the worker's schema manager
+        # creates and validates it on start, so no manual DDL here.
         self.sql(f"drop table if exists {self.table}")
-        self.sql(
-            f"create table {self.table} ("
-            "entity_id symbol, domain symbol, event_id varchar, state varchar, "
-            "attributes varchar, ingested_at timestamp, last_changed timestamp, "
-            "last_updated timestamp, context_id varchar, timestamp timestamp"
-            ") timestamp(timestamp) partition by day wal"
-        )
 
     def tearDown(self) -> None:
         self.sql(f"drop table if exists {self.table}")
@@ -107,7 +114,6 @@ class WorkerQuestDbIntegrationTests(unittest.TestCase):
             entity_id=f"sensor.worker_{index}",
             state=f"state-{index}",
             attributes_json='{"source":"integration"}',
-            timestamp_ns=timestamp,
             ingested_at_ns=timestamp + 2_000,
             last_changed_ns=timestamp - 2_000,
             last_updated_ns=timestamp - 1_000,
@@ -138,6 +144,12 @@ class WorkerQuestDbIntegrationTests(unittest.TestCase):
                 use_tls=False,
                 timeout_seconds=2,
             ),
+            schema_factory=lambda: IlpSchemaManager(
+                self.host,
+                self.port,
+                use_tls=False,
+                timeout_seconds=2,
+            ),
             random_source=lambda: 0.5,
         )
         service.start(timeout_seconds=2)
@@ -154,8 +166,8 @@ class WorkerQuestDbIntegrationTests(unittest.TestCase):
 
         query = (
             f"select entity_id, domain, event_id, state, attributes, "
-            f"ingested_at, last_changed, last_updated, context_id, timestamp "
-            f"from {self.table} order by timestamp"
+            f"ingested_at, last_changed, last_updated, context_id "
+            f"from {self.table} order by last_updated"
         )
         visibility_deadline = time.monotonic() + 5
         while True:
@@ -170,8 +182,10 @@ class WorkerQuestDbIntegrationTests(unittest.TestCase):
         self.assertEqual(first[2], "worker-event-1")
         self.assertEqual(first[3], "state-1")
         self.assertEqual(first[4], '{"source":"integration"}')
+        self.assertEqual(first[5], "2023-11-14T22:13:20.123459Z")
+        self.assertEqual(first[6], "2023-11-14T22:13:20.123455Z")
+        self.assertEqual(first[7], "2023-11-14T22:13:20.123456Z")
         self.assertEqual(first[8], "context-1")
-        self.assertEqual(first[9], "2023-11-14T22:13:20.123457Z")
 
         with self.spool_factory() as spool:
             self.assertEqual(spool.stats().pending_rows, 0)
@@ -201,6 +215,12 @@ class WorkerQuestDbIntegrationTests(unittest.TestCase):
             settings=settings,
             spool_factory=self.spool_factory,
             transport_factory=lambda: IlpHttpTransport(
+                "127.0.0.1",
+                proxy_port,
+                use_tls=False,
+                timeout_seconds=1,
+            ),
+            schema_factory=lambda: IlpSchemaManager(
                 "127.0.0.1",
                 proxy_port,
                 use_tls=False,

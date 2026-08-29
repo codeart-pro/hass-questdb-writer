@@ -9,7 +9,7 @@ import tempfile
 from typing import Any
 import unittest
 
-from homeassistant.const import EVENT_STATE_CHANGED
+from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNKNOWN
 from homeassistant.core import Context, Event, State
 
 from custom_components.hass_questdb_writer.event import EventEnvelope
@@ -245,7 +245,7 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
         envelope = self.service.events[0]
         self.assertEqual(envelope.event_id, "event-fixed")
         self.assertEqual(envelope.entity_id, "sensor.kitchen")
-        self.assertEqual(envelope.timestamp_ns, 1_700_000_000_123_456_000)
+        self.assertEqual(envelope.last_updated_ns, 1_699_999_999_123_456_000)
         self.assertEqual(envelope.last_changed_ns, 1_699_999_998_123_456_000)
         self.assertEqual(envelope.context_id, "context-1")
         self.assertIn('"values":[1,2]', envelope.attributes_json)
@@ -270,6 +270,26 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
         snapshot = runtime.snapshot()
         self.assertEqual(snapshot.state_events_seen, 1)
         self.assertEqual(snapshot.state_events_without_new_state, 1)
+        self.assertEqual(self.service.events, [])
+        await runtime.async_stop()
+
+    async def test_skips_unknown_state_events(self) -> None:
+        runtime = self.runtime()
+        await runtime.async_start()
+        state = State("sensor.unknown_test", STATE_UNKNOWN)
+        event = Event(
+            EVENT_STATE_CHANGED,
+            {
+                "entity_id": state.entity_id,
+                "old_state": None,
+                "new_state": state,
+            },
+        )
+        self.hass.bus.listener(event)
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot.state_events_seen, 1)
+        self.assertEqual(snapshot.state_events_skipped_unknown, 1)
+        self.assertEqual(snapshot.state_events_accepted, 0)
         self.assertEqual(self.service.events, [])
         await runtime.async_stop()
 

@@ -19,7 +19,6 @@ class EventEnvelopeTests(unittest.TestCase):
             entity_id="sensor.kitchen",
             state='on "quoted"',
             attributes_json='{"friendly_name":"Кухня","values":[1,true]}',
-            timestamp_ns=1_700_000_000_123_456_789,
             ingested_at_ns=1_700_000_000_223_456_789,
             last_changed_ns=1_700_000_000_120_000_999,
             last_updated_ns=1_700_000_000_121_000_999,
@@ -44,8 +43,10 @@ class EventEnvelopeTests(unittest.TestCase):
         encoded = self.event().to_ilp("ha_events")
         self.assertIn(b"ingested_at=1700000000223456t", encoded)
         self.assertIn(b"last_changed=1700000000120000t", encoded)
-        self.assertIn(b"last_updated=1700000000121000t", encoded)
-        self.assertTrue(encoded.endswith(b" 1700000000123456789\n"))
+        # The designated timestamp is the HA last_updated value in nanoseconds
+        # (ADR-0005) and must not be repeated as a named field.
+        self.assertTrue(encoded.endswith(b" 1700000000121000999\n"))
+        self.assertNotIn(b"last_updated=", encoded)
 
     def test_uses_entity_domain_as_a_symbol(self) -> None:
         encoded = self.event().to_ilp("ha_events")
@@ -67,7 +68,14 @@ class EventEnvelopeTests(unittest.TestCase):
 
     def test_rejects_unknown_payload_version(self) -> None:
         document = json.loads(self.event().to_bytes())
-        document["version"] = 2
+        document["version"] = 3
+        with self.assertRaisesRegex(EventEnvelopeError, "version"):
+            EventEnvelope.from_bytes(json.dumps(document).encode())
+
+    def test_rejects_legacy_payload_with_time_fired(self) -> None:
+        document = json.loads(self.event().to_bytes())
+        document["version"] = 1
+        document["timestamp_ns"] = 1_700_000_000_123_456_789
         with self.assertRaisesRegex(EventEnvelopeError, "version"):
             EventEnvelope.from_bytes(json.dumps(document).encode())
 
@@ -79,7 +87,7 @@ class EventEnvelopeTests(unittest.TestCase):
 
     def test_rejects_negative_designated_timestamp(self) -> None:
         with self.assertRaisesRegex(EventEnvelopeError, "non-negative"):
-            replace(self.event(), timestamp_ns=-1)
+            replace(self.event(), last_updated_ns=-1)
 
 
 if __name__ == "__main__":

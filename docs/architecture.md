@@ -302,6 +302,16 @@ The table is WAL, partitioned by day, and declared with
 restored-state replays idempotent at the database level. The development table
 name is `hass_questdb_writer_events`.
 
+The integration owns the table. On worker start it runs the `CREATE TABLE IF
+NOT EXISTS` DDL above and then validates an existing table with `SHOW COLUMNS`:
+exact column names and types, exactly one designated timestamp, and exactly
+the two declared dedup keys. Delivery is gated on this check, so QuestDB's
+implicit ILP table creation can never silently produce a table without the
+declared dedup semantics, and the spool keeps accepting events while the check
+is pending or failing. A table that differs from the owned schema blocks
+delivery with a precise diagnostic until it is corrected and the config entry
+is reloaded; an unreachable server only delays delivery with backoff.
+
 ## Configuration model
 
 The config entry will own:

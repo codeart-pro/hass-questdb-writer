@@ -146,3 +146,59 @@ class IlpHttpTransportTests(unittest.TestCase):
         transport.close()
         transport.close()
         self.assertTrue(connection.closed)
+
+    def test_exec_query_encodes_and_parses_json(self) -> None:
+        body = (
+            b'{"query":"SHOW COLUMNS FROM ha_events","columns":'
+            b'[{"name":"column","type":"STRING"}],"dataset":[["state"]],"count":1}'
+        )
+        connection = FakeConnection([FakeResponse(200, body)])
+        transport = self.transport(connection)
+        document = transport.exec_query("SHOW COLUMNS FROM ha_events")
+        self.assertEqual(document["dataset"], [["state"]])
+        method, path, body_bytes, _ = connection.requests[0]
+        self.assertEqual(method, "GET")
+        self.assertTrue(path.startswith("/exec?query=SHOW%20COLUMNS%20FROM"))
+        self.assertIsNone(body_bytes)
+
+    def test_exec_query_classifies_authentication_error(self) -> None:
+        transport = self.transport(FakeConnection([FakeResponse(401)]))
+        with self.assertRaises(AuthenticationIlpError) as caught:
+            transport.exec_query("SELECT 1")
+        self.assertFalse(caught.exception.retryable)
+        self.assertFalse(caught.exception.delivery_uncertain)
+
+    def test_exec_query_classifies_server_error_as_retryable(self) -> None:
+        connection = FakeConnection([FakeResponse(503, b"not ready")])
+        transport = self.transport(connection)
+        with self.assertRaises(RetryableIlpError) as caught:
+            transport.exec_query("SELECT 1")
+        self.assertTrue(caught.exception.retryable)
+        self.assertFalse(caught.exception.delivery_uncertain)
+        self.assertTrue(connection.closed)
+
+    def test_exec_query_classifies_rejected_statement_as_permanent(self) -> None:
+        body = b'{"query":"BAD SQL","error":"unexpected token","position":1}'
+        transport = self.transport(FakeConnection([FakeResponse(400, body)]))
+        with self.assertRaises(PermanentIlpError) as caught:
+            transport.exec_query("BAD SQL")
+        self.assertFalse(caught.exception.retryable)
+        self.assertFalse(caught.exception.delivery_uncertain)
+        self.assertIn("unexpected token", str(caught.exception))
+
+    def test_exec_query_network_failure_is_retryable_and_not_uncertain(self) -> None:
+        connection = FakeConnection([TimeoutError("timed out")])
+        transport = self.transport(connection)
+        with self.assertRaises(RetryableIlpError) as caught:
+            transport.exec_query("SELECT 1")
+        self.assertTrue(caught.exception.retryable)
+        self.assertFalse(caught.exception.delivery_uncertain)
+        self.assertTrue(connection.closed)
+
+    def test_exec_query_validates_before_connecting(self) -> None:
+        transport = self.transport(FakeConnection([]))
+        for query in ("", None):
+            with self.subTest(query=query):
+                with self.assertRaises(ValueError):
+                    transport.exec_query(query)  # type: ignore[arg-type]
+        self.assertEqual(transport.connection_count, 0)

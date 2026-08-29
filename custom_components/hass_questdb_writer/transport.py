@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import http.client
+import json
 import ssl
 from types import TracebackType
 from typing import Final
+import urllib.parse
 
 WRITE_PATH: Final = "/write?precision=n"
+EXEC_PATH: Final = "/exec?query="
 MAX_ERROR_BODY_BYTES: Final = 16 * 1024
 
 
@@ -173,6 +176,92 @@ class IlpHttpTransport:
             delivery_uncertain=False,
             status_code=response.status,
         )
+
+    def exec_query(self, query: str) -> dict:
+        """Run one QuestDB /exec statement and return the JSON document.
+
+        Network failures, retryable HTTP statuses, and server errors raise
+        RetryableIlpError; rejected statements raise PermanentIlpError with
+        the server detail; authentication failures raise AuthenticationIlpError.
+        Exec queries are never delivery-uncertain: DDL statements are
+        idempotent and validation queries are read-only.
+        """
+        if not isinstance(query, str) or not query:
+            raise ValueError("query must be a non-empty string")
+        path = f"{EXEC_PATH}{urllib.parse.quote(query, safe='')}"
+        connection = self._get_connection()
+        try:
+            connection.request(
+                "GET", path, body=None, headers=self._headers
+            )
+            response = connection.getresponse()
+            body = response.read(MAX_ERROR_BODY_BYTES + 1)
+        except (OSError, TimeoutError, http.client.HTTPException) as exc:
+            self.close()
+            raise RetryableIlpError(
+                f"QuestDB exec request failed: {type(exc).__name__}",
+                retryable=True,
+                delivery_uncertain=False,
+            ) from exc
+
+        if not 200 <= response.status < 300:
+            truncated = len(body) > MAX_ERROR_BODY_BYTES
+            if truncated:
+                body = body[:MAX_ERROR_BODY_BYTES]
+                self.close()
+            detail = body.decode("utf-8", errors="replace").strip()
+            message = f"QuestDB exec returned HTTP {response.status}"
+            if detail:
+                message = f"{message}: {detail}"
+
+            if response.status in (401, 403):
+                raise AuthenticationIlpError(
+                    message,
+                    retryable=False,
+                    delivery_uncertain=False,
+                    status_code=response.status,
+                )
+            if response.status in (408, 425, 429):
+                if response.status == 408:
+                    self.close()
+                raise RetryableIlpError(
+                    message,
+                    retryable=True,
+                    delivery_uncertain=False,
+                    status_code=response.status,
+                )
+            if 500 <= response.status < 600:
+                self.close()
+                raise RetryableIlpError(
+                    message,
+                    retryable=True,
+                    delivery_uncertain=False,
+                    status_code=response.status,
+                )
+            raise PermanentIlpError(
+                message,
+                retryable=False,
+                delivery_uncertain=False,
+                status_code=response.status,
+            )
+
+        if len(body) > MAX_ERROR_BODY_BYTES:
+            self.close()
+        try:
+            document = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise PermanentIlpError(
+                "QuestDB exec returned an invalid JSON response",
+                retryable=False,
+                delivery_uncertain=False,
+            ) from exc
+        if not isinstance(document, dict):
+            raise PermanentIlpError(
+                "QuestDB exec returned a non-object JSON response",
+                retryable=False,
+                delivery_uncertain=False,
+            )
+        return document
 
     def __enter__(self) -> IlpHttpTransport:
         return self
