@@ -23,6 +23,21 @@ It contains no production credentials or production endpoints.
 - QuestDB TCP/ILP: `localhost:19009`
 - QuestDB health endpoint: <http://localhost:19003>
 
+## Local test credentials
+
+These credentials belong only to the isolated Podman development stack. They
+are intentionally weak and must not be reused for production or for a Home
+Assistant instance reachable from another network.
+
+| Service | Username | Password | Access |
+|---|---|---|---|
+| Home Assistant | `test` | `test` | Local administrator |
+| QuestDB HTTP/ILP and Web Console | none | none | Authentication disabled |
+
+QuestDB has no configured username or password because authentication is not
+enabled in `compose.yaml`. There are no other passwords or production
+credentials in this repository. Production secrets must not be committed.
+
 ## Commands
 
 ```text
