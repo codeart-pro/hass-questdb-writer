@@ -33,5 +33,11 @@ make logs
 make down
 ```
 
+The reproducible SQLite spool benchmark runs from the repository root as:
+
+```text
+python -m benchmarks.sqlite_spool
+```
+
 The runtime integration is `custom_components/hass_questdb_writer`. It is a
 clean implementation and does not use QSS as its code base.

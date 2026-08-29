@@ -107,17 +107,32 @@ terminate the worker silently.
 
 ### Durable spool
 
-The spool is a private SQLite database under the integration's storage area.
-Only the writer thread accesses it. WAL mode and schema details will be selected
-after filesystem and shutdown tests in the HA container.
+The spool is a private SQLite database on the local filesystem under the
+integration's storage area. It uses WAL journal mode, `synchronous=FULL`, and
+explicit write transactions. SQLite WAL files must not be placed on a network
+filesystem. Only the writer thread owns the connection; the default SQLite
+same-thread check remains enabled.
 
-Each row has a local sequence number, event ID, serialized envelope, creation
-time, attempt metadata, and delivery state. The sequence number preserves local
-ordering; it does not claim global ordering across multiple HA instances.
+Pending rows have a local sequence number, stable event ID, opaque serialized
+payload, creation time, attempt count, last error, and sticky
+delivery-uncertain flag. The sequence number preserves local FIFO order; it
+does not claim global ordering across multiple HA instances. Confirmed rows
+are deleted atomically. Permanently rejected rows move atomically into a
+separate dead-letter table.
 
-The spool has configurable byte/row/age limits. Reaching a limit must be
-visible through logs and diagnostics and must invoke an explicit policy. The
-project will not advertise unlimited outage retention.
+Pending and dead-letter stores both have explicit row and payload-byte limits.
+The limits do not pretend to include SQLite page, index, WAL, or metadata
+overhead, so the integration also needs a filesystem free-space guard before
+production release. Reaching any limit must be visible through logs and
+diagnostics and invoke an explicit policy. The project will not advertise
+unlimited outage retention.
+
+The worker persists multiple ingress events in one transaction. The local
+ARM64 benchmark measured a median of about 19,900 events/s for one transaction
+per event and 52,600 events/s for 100-event transactions with 256-byte
+payloads. These numbers validate the mechanism, not production defaults; the
+production storage filesystem must be measured separately. Details are in
+[benchmarks/sqlite-spool.md](benchmarks/sqlite-spool.md).
 
 ### QuestDB transport
 
