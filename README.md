@@ -54,6 +54,10 @@ Copy `custom_components/hass_questdb_writer/` into your Home Assistant
 
 - **Include / exclude** — entities, domains, globs (include-only acts as a
   strict allowlist; excludes cut, everything else is written)
+- **Attribute allow / deny list** — comma-separated attribute-name patterns
+  with `*`/`?` wildcards; an allow list restricts which attributes are
+  written, a deny list removes matching ones (deny always wins). Empty =
+  write everything
 - **Advanced** — queue/spool/dead-letter capacities, batch sizes, retry
   and timeout tuning (all have provisional defaults, see the architecture
   doc)

@@ -12,6 +12,8 @@ CONF_PASSWORD = "password"
 CONF_SHOW_ADVANCED = "show_advanced"
 CONF_INCLUDE = "include"
 CONF_EXCLUDE = "exclude"
+CONF_ATTRIBUTE_ALLOWLIST = "attribute_allowlist"
+CONF_ATTRIBUTE_DENYLIST = "attribute_denylist"
 
 # Options-flow keys; every value defaults to the matching PROVISIONAL_*
 # constant so entries created before an option existed keep working.

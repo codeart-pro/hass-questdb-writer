@@ -34,6 +34,8 @@
           "exclude_domains": "Never include these domains",
           "include_entity_globs": "Always include these glob patterns",
           "exclude_entity_globs": "Never include these glob patterns",
+          "attribute_allowlist": "Attribute allow list (comma-separated, supports * and ?)",
+          "attribute_denylist": "Attribute deny list (comma-separated, supports * and ?)",
           "show_advanced": "Show advanced settings"
         }
       },

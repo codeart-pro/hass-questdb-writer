@@ -326,6 +326,10 @@ The options flow owns:
 
 - the include/exclude entity filter (entities, domains, globs) applied at
   the listener with Home Assistant's standard `EntityFilter` semantics;
+- the attribute allow/deny filter (comma-separated patterns with `*`/`?`
+  wildcards, [ADR 0008](decisions/0008-attribute-filter.md)) applied to
+  attribute names before serialization; deny always wins, an empty allow
+  list writes everything;
 - the batching, retry, spool, and timeout limits, exposed behind a
   "Show advanced settings" step; every value defaults to the matching
   `PROVISIONAL_*` constant, so older entries keep working without migration.

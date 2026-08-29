@@ -26,6 +26,8 @@ from homeassistant.helpers.entityfilter import (
 )
 
 from .const import (
+    CONF_ATTRIBUTE_ALLOWLIST,
+    CONF_ATTRIBUTE_DENYLIST,
     CONF_DELIVERY_BATCH_BYTES,
     CONF_DELIVERY_BATCH_ROWS,
     CONF_FLUSH_INTERVAL_SECONDS,
@@ -169,6 +171,14 @@ def _init_schema(options: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_EXCLUDE_ENTITY_GLOBS,
                 default=", ".join(exclude.get(CONF_ENTITY_GLOBS, [])),
+            ): selector.TextSelector(),
+            vol.Optional(
+                CONF_ATTRIBUTE_ALLOWLIST,
+                default=", ".join(options.get(CONF_ATTRIBUTE_ALLOWLIST, [])),
+            ): selector.TextSelector(),
+            vol.Optional(
+                CONF_ATTRIBUTE_DENYLIST,
+                default=", ".join(options.get(CONF_ATTRIBUTE_DENYLIST, [])),
             ): selector.TextSelector(),
             vol.Optional(CONF_SHOW_ADVANCED, default=False): bool,
         }
@@ -329,9 +339,20 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
             self._filter_options = {
                 CONF_INCLUDE: include,
                 CONF_EXCLUDE: exclude,
+                CONF_ATTRIBUTE_ALLOWLIST: _split_csv(
+                    user_input.get(CONF_ATTRIBUTE_ALLOWLIST, "")
+                ),
+                CONF_ATTRIBUTE_DENYLIST: _split_csv(
+                    user_input.get(CONF_ATTRIBUTE_DENYLIST, "")
+                ),
             }
             try:
-                INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA(self._filter_options)
+                INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA(
+                    {
+                        CONF_INCLUDE: include,
+                        CONF_EXCLUDE: exclude,
+                    }
+                )
             except vol.Invalid:
                 errors["base"] = "invalid_filter"
             else:

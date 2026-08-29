@@ -1,0 +1,62 @@
+# Quality scale target: Gold
+
+Target: [Home Assistant integration quality scale — Gold](https://www.home-assistant.io/docs/quality_scale/).
+
+Gold is the release bar for the first public version. Every tier below Gold
+must be complete before publication (Bronze → Silver → Gold).
+
+## Bronze — baseline (done)
+
+- [x] Can be easily set up through the UI (config flow + options flow).
+- [x] Source code adheres to basic coding standards (ruff-clean, HA-style).
+- [x] Automated tests guard the integration (unit + integration, run inside
+      the dev Home Assistant container).
+- [x] Basic end-user documentation (README: install, setup, options).
+
+## Silver
+
+- [ ] **Auth-failure visibility**: on `AuthenticationIlpError` the worker
+      goes `BLOCKED`; the user must be told to fix the credentials
+      (repair issue / system notification) and delivery must resume
+      automatically after the options are corrected (reload already does
+      this; the visible signal is missing).
+- [ ] **Code owners**: non-empty `codeowners` in `manifest.json`
+      (add the maintainer's GitHub handle at publication time).
+- [ ] **Recovery without log spam**: backoff + rate-limited warnings are
+      implemented; verify against a long QuestDB outage in the dev stack.
+- [ ] **Troubleshooting documentation**: dedicated section in the README
+      (symptoms → causes → fixes: auth, unreachable host, schema mismatch,
+      spool/dead-letter limits).
+
+## Gold
+
+- [ ] **Diagnostics**: diagnostics flow exposing safe configuration
+      (secrets redacted), worker snapshot (state, counters), spool stats,
+      and the most recent errors — downloadable from the UI.
+- [x] Reconfiguration via the UI (options flow with reload on save).
+- [ ] **Full automated test coverage**: run a coverage audit; close the gaps
+      (config flow branches, worker state transitions, transport error
+      classes, schema validation paths, diagnostics).
+- [ ] **End-user documentation**: README expanded with use cases, example
+      QuestDB queries (`SAMPLE BY`, `LATEST ON`, casts), example
+      automations, and links to the sample Grafana dashboards (from the
+      devstack repo).
+- [ ] **Examples**: usable Grafana dashboards and one or two example
+      automations published as part of the docs.
+
+## Release prerequisites (outside the tiers)
+
+- [x] Attribute allow/deny filter with `*`/`?` wildcards, UI-only
+      (ADR-0008).
+- [ ] Production defaults replacing the `PROVISIONAL_*` values, after
+      production-rate spool/ILP benchmarks and filesystem tests.
+- [ ] Honest semantic version in `manifest.json` (`0.1.0-dev0` →
+      `0.1.0`) and release tags for HACS.
+- [ ] `hacs.json` + `LICENSE` + README verified against the HACS
+      checklist.
+
+## Explicit non-goals
+
+- Replacing Home Assistant Recorder.
+- End-to-end exactly-once delivery (server-side dedup only).
+- YAML-based configuration (config entry + options flow only, per ADR-0007).

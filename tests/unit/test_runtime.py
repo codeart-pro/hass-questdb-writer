@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import datetime as dt
+import json
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -14,6 +15,7 @@ from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNKNOWN
 from homeassistant.core import Context, Event, State
 from homeassistant.helpers.entityfilter import convert_include_exclude_filter
 
+from custom_components.hass_questdb_writer.attribute_filter import AttributeFilter
 from custom_components.hass_questdb_writer.event import EventEnvelope
 from custom_components.hass_questdb_writer.runtime import (
     ConnectionConfiguration,
@@ -428,6 +430,90 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(datetime_to_epoch_ns(value), 86_400_000_001_000)
         with self.assertRaises(ValueError):
             datetime_to_epoch_ns(value.replace(tzinfo=None))
+
+    async def test_attribute_filter_applies_and_counts_removed_entries(self) -> None:
+        configuration = replace(
+            self.configuration(),
+            attribute_filter=AttributeFilter(
+                allow=("friendly_name", "unit_*"),
+                deny=("rssi",),
+            ),
+        )
+        runtime = HassQuestDbRuntime(
+            self.hass,  # type: ignore[arg-type]
+            configuration,
+            service_factory=lambda: self.service,  # type: ignore[arg-type,return-value]
+            event_id_factory=lambda: "event-fixed",
+            wall_time_ns=lambda: 1_700_000_000_500_000_000,
+        )
+        await runtime.async_start()
+        timestamp = dt.datetime(2023, 11, 14, 22, 13, 20, 123456, tzinfo=dt.UTC)
+        state = State(
+            "sensor.kitchen",
+            "23.5",
+            attributes={
+                "friendly_name": "Kitchen",
+                "unit_of_measurement": "°C",
+                "rssi": -70,
+                "linkquality": 100,
+                "device_class": "temperature",
+            },
+            last_changed=timestamp - dt.timedelta(seconds=2),
+            last_updated=timestamp - dt.timedelta(seconds=1),
+            context=Context(id="context-1"),
+        )
+        event = Event(
+            EVENT_STATE_CHANGED,
+            {
+                "entity_id": state.entity_id,
+                "old_state": None,
+                "new_state": state,
+            },
+        )
+        self.hass.bus.listener(event)
+        self.assertEqual(len(self.service.events), 1)
+        self.assertEqual(
+            json.loads(self.service.events[0].attributes_json),
+            {"friendly_name": "Kitchen", "unit_of_measurement": "°C"},
+        )
+        self.assertEqual(runtime.snapshot().attribute_entries_removed, 3)
+        await runtime.async_stop()
+
+    async def test_attribute_filter_deny_wins_over_allow(self) -> None:
+        configuration = replace(
+            self.configuration(),
+            attribute_filter=AttributeFilter(
+                allow=("friendly_name", "rssi"),
+                deny=("rssi",),
+            ),
+        )
+        runtime = HassQuestDbRuntime(
+            self.hass,  # type: ignore[arg-type]
+            configuration,
+            service_factory=lambda: self.service,  # type: ignore[arg-type,return-value]
+            event_id_factory=lambda: "event-fixed",
+            wall_time_ns=lambda: 1_700_000_000_500_000_000,
+        )
+        await runtime.async_start()
+        state = State(
+            "sensor.denied",
+            "on",
+            attributes={"friendly_name": "Denied", "rssi": -55},
+        )
+        event = Event(
+            EVENT_STATE_CHANGED,
+            {
+                "entity_id": state.entity_id,
+                "old_state": None,
+                "new_state": state,
+            },
+        )
+        self.hass.bus.listener(event)
+        self.assertEqual(
+            json.loads(self.service.events[0].attributes_json),
+            {"friendly_name": "Denied"},
+        )
+        await runtime.async_stop()
 
 
 if __name__ == "__main__":

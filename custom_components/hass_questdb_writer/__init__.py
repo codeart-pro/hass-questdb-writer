@@ -19,7 +19,10 @@ from homeassistant.helpers.entityfilter import (
     convert_include_exclude_filter,
 )
 
+from .attribute_filter import AttributeFilter
 from .const import (
+    CONF_ATTRIBUTE_ALLOWLIST,
+    CONF_ATTRIBUTE_DENYLIST,
     CONF_DELIVERY_BATCH_BYTES,
     CONF_DELIVERY_BATCH_ROWS,
     CONF_FLUSH_INTERVAL_SECONDS,
@@ -183,7 +186,17 @@ def _runtime_configuration(
         ),
         tracked_entity_ids=None,
         entity_filter=_entity_filter(options),
+        attribute_filter=_attribute_filter(options),
     )
+
+
+def _attribute_filter(options: dict) -> AttributeFilter | None:
+    """Build the attribute allow/deny filter from stored options, if any."""
+    allow = tuple(options.get(CONF_ATTRIBUTE_ALLOWLIST, []))
+    deny = tuple(options.get(CONF_ATTRIBUTE_DENYLIST, []))
+    if not allow and not deny:
+        return None
+    return AttributeFilter(allow=allow, deny=deny)
 
 
 async def async_setup_entry(

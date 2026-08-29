@@ -10,6 +10,8 @@ from custom_components.hass_questdb_writer.config_flow import (
     HassQuestDbWriterOptionsFlow,
 )
 from custom_components.hass_questdb_writer.const import (
+    CONF_ATTRIBUTE_ALLOWLIST,
+    CONF_ATTRIBUTE_DENYLIST,
     CONF_DELIVERY_BATCH_ROWS,
     CONF_EXCLUDE,
     CONF_FLUSH_ON_SHUTDOWN,
@@ -133,6 +135,8 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
             "exclude_domains": "sensor, binary_sensor",
             "include_entity_globs": "sensor.garden_*",
             "exclude_entity_globs": "",
+            CONF_ATTRIBUTE_ALLOWLIST: "",
+            CONF_ATTRIBUTE_DENYLIST: "",
             CONF_SHOW_ADVANCED: False,
         }
         values.update(overrides or {})
@@ -143,6 +147,8 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_init()
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "init")
+        self.assertIn(CONF_ATTRIBUTE_ALLOWLIST, result["data_schema"].schema)
+        self.assertIn(CONF_ATTRIBUTE_DENYLIST, result["data_schema"].schema)
 
         result = await flow.async_step_init(self.filter_input())
         self.assertEqual(result["type"], "create_entry")
@@ -161,6 +167,28 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
                 "entity_globs": [],
                 "entities": [],
             },
+        )
+        self.assertEqual(result["data"][CONF_ATTRIBUTE_ALLOWLIST], [])
+        self.assertEqual(result["data"][CONF_ATTRIBUTE_DENYLIST], [])
+
+    async def test_init_step_stores_attribute_pattern_lists(self) -> None:
+        flow = self.flow()
+        result = await flow.async_step_init(
+            self.filter_input(
+                {
+                    CONF_ATTRIBUTE_ALLOWLIST: "friendly_name, unit_*, rssi",
+                    CONF_ATTRIBUTE_DENYLIST: "rssi, linkquality",
+                }
+            )
+        )
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["data"][CONF_ATTRIBUTE_ALLOWLIST],
+            ["friendly_name", "unit_*", "rssi"],
+        )
+        self.assertEqual(
+            result["data"][CONF_ATTRIBUTE_DENYLIST],
+            ["rssi", "linkquality"],
         )
 
     async def test_init_step_carries_filter_into_advanced_step(self) -> None:
