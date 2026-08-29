@@ -41,3 +41,8 @@ python -m benchmarks.sqlite_spool
 
 The runtime integration is `custom_components/hass_questdb_writer`. It is a
 clean implementation and does not use QSS as its code base.
+
+The current `0.1.0-dev0` config-entry runtime is wired to the worker and uses an
+explicit provisional local profile. Queue, spool, retry, and timeout values are
+not production defaults yet; see
+[`docs/decisions/0004-home-assistant-lifecycle.md`](docs/decisions/0004-home-assistant-lifecycle.md).

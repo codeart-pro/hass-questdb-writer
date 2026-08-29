@@ -71,8 +71,11 @@ for the runtime.
 
 ### Event listener and filter
 
-The listener uses Home Assistant's optimized state-change event helper, runs in
-the Home Assistant event loop, and performs only bounded, non-blocking work:
+The listener runs in the Home Assistant event loop and performs only bounded,
+non-blocking work. When explicit entity IDs are configured, it uses Home
+Assistant's indexed state-change helper. When all entities are selected, it
+uses `hass.bus.async_listen(EVENT_STATE_CHANGED, ...)`: in Home Assistant
+2026.7.2 the indexed helper does not interpret `MATCH_ALL` as a wildcard.
 
 1. Reject events without a new state.
 2. Apply include/exclude rules by entity ID, domain, and entity glob.
@@ -304,6 +307,12 @@ The config entry will own:
 Secrets are stored through Home Assistant's config-entry mechanisms and are
 redacted from logs and diagnostics. Changes that alter connection ownership or
 schema trigger a controlled reload.
+
+The current `0.1.0-dev0` runtime has a deliberately named `PROVISIONAL_*`
+development profile. Its queue, spool, retry, timeout, and batch values exist
+to run the local end-to-end integration; they are not declared supported
+production defaults. The profile and remaining measurements are recorded in
+[decisions/0004-home-assistant-lifecycle.md](decisions/0004-home-assistant-lifecycle.md).
 
 ## Observability
 

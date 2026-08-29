@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect HASS QuestDB Writer",
+        "description": "Configure the QuestDB ILP/HTTP destination.",
+        "data": {
+          "host": "QuestDB host",
+          "port": "HTTP port",
+          "table": "Table",
+          "use_tls": "Use HTTPS"
+        }
+      }
+    },
+    "error": {
+      "invalid_connection": "Enter a non-empty host and table. The UTF-8 table name must not exceed 127 bytes."
+    },
+    "abort": {
+      "already_configured": "This QuestDB destination and table are already configured."
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Подключение HASS QuestDB Writer",
+        "description": "Настройте адрес QuestDB ILP/HTTP.",
+        "data": {
+          "host": "Адрес QuestDB",
+          "port": "HTTP-порт",
+          "table": "Таблица",
+          "use_tls": "Использовать HTTPS"
+        }
+      }
+    },
+    "error": {
+      "invalid_connection": "Укажите адрес и таблицу. Имя таблицы в UTF-8 не должно превышать 127 байт."
+    },
+    "abort": {
+      "already_configured": "Это назначение QuestDB и таблица уже настроены."
+    }
+  }
+}
