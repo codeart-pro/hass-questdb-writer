@@ -357,11 +357,13 @@ outages. Per-event success logging is disabled outside targeted debugging.
 
 ## Development environment
 
-The local podman stack (`compose.yaml`) runs QuestDB, Home Assistant, and
-Grafana with the integration mounted live from the repository. Ports, the
-Grafana credentials (`test`/`test`), the provisioning files, the live-run
-checklist, and the test commands are described in
-[development.md](development.md).
+The local podman stack (QuestDB, Home Assistant, Grafana, dashboards) lives
+in the separate
+[`hass-questdb-writer-devstack`](https://github.com/codeart/hass-questdb-writer-devstack)
+repository, which mounts the integration live from this repository. Ports,
+the Grafana credentials (`test`/`test`), the provisioning files, the
+live-run checklist, and the test commands are described in its
+[`docs/development.md`](https://github.com/codeart/hass-questdb-writer-devstack/blob/main/docs/development.md).
 
 ## Testing strategy
 
