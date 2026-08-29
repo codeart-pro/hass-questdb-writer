@@ -286,7 +286,12 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
     ):
         with patch(
             "custom_components.hass_questdb_writer.config_flow._domain_selector_options",
-            AsyncMock(return_value=[]),
+            AsyncMock(
+                return_value=[
+                    {"label": "Sensor", "value": "sensor"},
+                    {"label": "Binary sensor", "value": "binary_sensor"},
+                ]
+            ),
         ):
             return await flow.async_step_init(user_input)
 
@@ -385,6 +390,14 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {"base": "overlapping_filters"})
         self.assertIn("entities: sensor.kitchen", result["description_placeholders"]["conflicts"])
+        # the entered values must survive the error re-render
+        schema_values = result["data_schema"]({})
+        self.assertEqual(
+            schema_values["include_entities"], ["sensor.kitchen"]
+        )
+        self.assertEqual(
+            schema_values["exclude_entities"], ["sensor.kitchen"]
+        )
 
     async def test_overlapping_attributes_are_rejected(self) -> None:
         flow = self.flow()
@@ -416,6 +429,12 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         conflicts = result["description_placeholders"]["conflicts"]
         self.assertIn("domains: sensor", conflicts)
         self.assertIn("globs: sensor.garden_*", conflicts)
+        # the entered values must survive the error re-render
+        schema_values = result["data_schema"]({})
+        self.assertEqual(schema_values["include_domains"], ["sensor"])
+        self.assertEqual(
+            schema_values["exclude_domains"], ["sensor", "binary_sensor"]
+        )
 
     async def test_identical_items_in_include_and_exclude_entities(self) -> None:
         flow = self.flow()

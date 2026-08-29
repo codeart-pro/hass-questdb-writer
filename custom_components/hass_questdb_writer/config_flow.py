@@ -468,6 +468,10 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 CONF_ATTRIBUTE_ALLOWLIST: attribute_allow,
                 CONF_ATTRIBUTE_DENYLIST: attribute_deny,
             }
+            display_options = {
+                **self._filter_options,
+                CONF_SHOW_ADVANCED: user_input.get(CONF_SHOW_ADVANCED, False),
+            }
             overlaps = _overlapping_pairs(
                 include, exclude, attribute_allow, attribute_deny
             )
@@ -475,7 +479,7 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 return self.async_show_form(
                     step_id="init",
                     data_schema=_init_schema(
-                        self._entry.options,
+                        display_options,
                         await _domain_selector_options(self.hass),
                     ),
                     errors={"base": "overlapping_filters"},
@@ -490,15 +494,21 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 )
             except vol.Invalid:
                 errors["base"] = "invalid_filter"
-            else:
-                if user_input.get(CONF_SHOW_ADVANCED):
-                    return self.async_show_form(
-                        step_id="advanced",
-                        data_schema=_advanced_schema(self._entry.options),
-                    )
-                return self.async_create_entry(
-                    title="", data=self._filter_options
+            if errors:
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=_init_schema(
+                        display_options,
+                        await _domain_selector_options(self.hass),
+                    ),
+                    errors=errors,
                 )
+            if user_input.get(CONF_SHOW_ADVANCED):
+                return self.async_show_form(
+                    step_id="advanced",
+                    data_schema=_advanced_schema(self._entry.options),
+                )
+            return self.async_create_entry(title="", data=self._filter_options)
         domain_options = await _domain_selector_options(self.hass)
         return self.async_show_form(
             step_id="init",
