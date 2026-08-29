@@ -267,8 +267,8 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "include_entities": ["input_boolean.questdb_test"],
                 "exclude_entities": [],
-                "include_domains": "",
-                "exclude_domains": "",
+                "include_domains": [],
+                "exclude_domains": [],
                 "include_entity_globs": "",
                 "exclude_entity_globs": "",
                 "show_advanced": False,

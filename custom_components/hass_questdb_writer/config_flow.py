@@ -14,7 +14,9 @@ from homeassistant.const import (
     CONF_EXCLUDE,
     CONF_INCLUDE,
 )
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import selector
+from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.helpers.entityfilter import (
     CONF_EXCLUDE_DOMAINS,
     CONF_EXCLUDE_ENTITIES,
@@ -25,6 +27,7 @@ from homeassistant.helpers.entityfilter import (
     CONF_INCLUDE_ENTITY_GLOBS,
     INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA,
 )
+from homeassistant.loader import async_get_integrations
 
 from .const import (
     CONF_ATTRIBUTE_ALLOWLIST,
@@ -91,6 +94,28 @@ def _split_csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _to_list(value: object) -> list[str]:
+    """Normalize a multi-select value (list) or legacy CSV string to a list."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return _split_csv(str(value)) if value else []
+
+
+async def _domain_selector_options(hass: HomeAssistant) -> list[dict[str, str]]:
+    """Collect domains that actually have entities, with integration names."""
+    registry = async_get_entity_registry(hass)
+    domains = sorted({entity.domain for entity in registry.entities.values()})
+    integrations = await async_get_integrations(hass, domains)
+    options: list[dict[str, str]] = []
+    for domain in domains:
+        integration = integrations.get(domain)
+        if isinstance(integration, Exception):
+            options.append({"label": domain, "value": domain})
+        else:
+            options.append({"label": integration.name, "value": domain})
+    return options
+
+
 def _number(
     minimum: float,
     maximum: float,
@@ -133,20 +158,22 @@ def _filter_side(user_input: dict[str, Any], include: bool) -> dict[str, Any]:
     """Assemble one include/exclude side in the entity-filter schema shape."""
     if include:
         entities = user_input.get(CONF_INCLUDE_ENTITIES, [])
-        domains = user_input.get(CONF_INCLUDE_DOMAINS, "")
+        domains = user_input.get(CONF_INCLUDE_DOMAINS, [])
         globs = user_input.get(CONF_INCLUDE_ENTITY_GLOBS, "")
     else:
         entities = user_input.get(CONF_EXCLUDE_ENTITIES, [])
-        domains = user_input.get(CONF_EXCLUDE_DOMAINS, "")
+        domains = user_input.get(CONF_EXCLUDE_DOMAINS, [])
         globs = user_input.get(CONF_EXCLUDE_ENTITY_GLOBS, "")
     return {
-        CONF_DOMAINS: _split_csv(domains),
-        CONF_ENTITY_GLOBS: _split_csv(globs),
+        CONF_DOMAINS: _to_list(domains),
+        CONF_ENTITY_GLOBS: _split_csv(globs) if isinstance(globs, str) else _to_list(globs),
         CONF_ENTITIES: list(entities),
     }
 
 
-def _init_schema(options: dict[str, Any]) -> vol.Schema:
+def _init_schema(
+    options: dict[str, Any], domain_options: list[dict[str, str]]
+) -> vol.Schema:
     include = options.get(CONF_INCLUDE, {}) or {}
     exclude = options.get(CONF_EXCLUDE, {}) or {}
     return vol.Schema(
@@ -165,12 +192,24 @@ def _init_schema(options: dict[str, Any]) -> vol.Schema:
             ),
             vol.Optional(
                 CONF_INCLUDE_DOMAINS,
-                default=", ".join(include.get(CONF_DOMAINS, [])),
-            ): selector.TextSelector(),
+                default=include.get(CONF_DOMAINS, []),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=domain_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional(
                 CONF_EXCLUDE_DOMAINS,
-                default=", ".join(exclude.get(CONF_DOMAINS, [])),
-            ): selector.TextSelector(),
+                default=exclude.get(CONF_DOMAINS, []),
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=domain_options,
+                    multiple=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional(
                 CONF_INCLUDE_ENTITY_GLOBS,
                 default=", ".join(include.get(CONF_ENTITY_GLOBS, [])),
@@ -430,9 +469,10 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(
                     title="", data=self._filter_options
                 )
+        domain_options = await _domain_selector_options(self.hass)
         return self.async_show_form(
             step_id="init",
-            data_schema=_init_schema(self._entry.options),
+            data_schema=_init_schema(self._entry.options, domain_options),
             errors=errors,
         )
 

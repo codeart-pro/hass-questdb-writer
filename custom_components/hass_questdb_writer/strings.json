@@ -30,14 +30,14 @@
         "title": "Entity filter",
         "description": "Choose which entities are written to QuestDB. Domains and globs are comma-separated, for example: sensor, binary_sensor and sensor.kitchen_*. Attribute patterns also support * and ?, for example: friendly_name, unit_*, rssi.",
         "data": {
-          "include_entities": "Always include these entities",
-          "exclude_entities": "Never include these entities",
-          "include_domains": "Always include these domains",
-          "exclude_domains": "Never include these domains",
-          "include_entity_globs": "Always include these glob patterns",
-          "exclude_entity_globs": "Never include these glob patterns",
-          "attribute_allowlist": "Attribute allow list (comma-separated; * and ? supported, e.g. friendly_name, unit_*, rssi)",
-          "attribute_denylist": "Attribute deny list (comma-separated; * and ? supported, e.g. rssi, update.*)",
+          "include_entities": "Entities to include",
+          "exclude_entities": "Entities to exclude",
+          "include_domains": "Domains to include",
+          "exclude_domains": "Domains to exclude",
+          "include_entity_globs": "Glob patterns to include",
+          "exclude_entity_globs": "Glob patterns to exclude",
+          "attribute_allowlist": "Attribute patterns to include",
+          "attribute_denylist": "Attribute patterns to exclude",
           "show_advanced": "Show advanced settings"
         }
       },

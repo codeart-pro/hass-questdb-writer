@@ -281,6 +281,15 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         entry = Mock(options=options or {})
         return HassQuestDbWriterOptionsFlow(entry)
 
+    async def _init(
+        self, flow: HassQuestDbWriterOptionsFlow, user_input: dict | None = None
+    ):
+        with patch(
+            "custom_components.hass_questdb_writer.config_flow._domain_selector_options",
+            AsyncMock(return_value=[]),
+        ):
+            return await flow.async_step_init(user_input)
+
     def filter_input(self, overrides: dict | None = None) -> dict[str, object]:
         values: dict[str, object] = {
             "include_entities": ["sensor.kitchen"],
@@ -298,13 +307,13 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_init_step_builds_include_exclude_filter(self) -> None:
         flow = self.flow()
-        result = await flow.async_step_init()
+        result = await self._init(flow)
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "init")
         self.assertIn(CONF_ATTRIBUTE_ALLOWLIST, result["data_schema"].schema)
         self.assertIn(CONF_ATTRIBUTE_DENYLIST, result["data_schema"].schema)
 
-        result = await flow.async_step_init(self.filter_input())
+        result = await self._init(flow, self.filter_input())
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(
             result["data"][CONF_INCLUDE],
@@ -327,13 +336,14 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_init_step_stores_attribute_pattern_lists(self) -> None:
         flow = self.flow()
-        result = await flow.async_step_init(
+        result = await self._init(
+            flow,
             self.filter_input(
                 {
                     CONF_ATTRIBUTE_ALLOWLIST: "friendly_name, unit_*, rssi",
                     CONF_ATTRIBUTE_DENYLIST: "rssi, linkquality",
                 }
-            )
+            ),
         )
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(
@@ -347,8 +357,8 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_init_step_carries_filter_into_advanced_step(self) -> None:
         flow = self.flow()
-        result = await flow.async_step_init(
-            self.filter_input({CONF_SHOW_ADVANCED: True})
+        result = await self._init(
+            flow, self.filter_input({CONF_SHOW_ADVANCED: True})
         )
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "advanced")
@@ -366,9 +376,7 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_advanced_rejects_retry_bounds_inversion(self) -> None:
         flow = self.flow()
-        await flow.async_step_init(
-            self.filter_input({CONF_SHOW_ADVANCED: True})
-        )
+        await self._init(flow, self.filter_input({CONF_SHOW_ADVANCED: True}))
         result = await flow.async_step_advanced(
             {
                 CONF_RETRY_INITIAL_SECONDS: 30,
@@ -379,9 +387,7 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_advanced_rejects_event_larger_than_dead_letter(self) -> None:
         flow = self.flow()
-        await flow.async_step_init(
-            self.filter_input({CONF_SHOW_ADVANCED: True})
-        )
+        await self._init(flow, self.filter_input({CONF_SHOW_ADVANCED: True}))
         result = await flow.async_step_advanced(
             {
                 CONF_MAX_SERIALIZED_EVENT_BYTES: 1_048_576,
@@ -392,9 +398,7 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_advanced_schema_preserves_entered_values_on_error(self) -> None:
         flow = self.flow()
-        await flow.async_step_init(
-            self.filter_input({CONF_SHOW_ADVANCED: True})
-        )
+        await self._init(flow, self.filter_input({CONF_SHOW_ADVANCED: True}))
         user_input = {
             CONF_RETRY_INITIAL_SECONDS: 30,
             CONF_RETRY_MAX_SECONDS: 1,
