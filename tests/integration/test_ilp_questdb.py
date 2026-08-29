@@ -9,7 +9,7 @@ import unittest
 import urllib.parse
 import urllib.request
 
-from custom_components.hass_questdb_writer.ilp import encode_row
+from custom_components.hass_questdb_writer.ilp import IlpTimestampMicros, encode_row
 from custom_components.hass_questdb_writer.transport import (
     IlpHttpTransport,
     PermanentIlpError,
@@ -33,7 +33,7 @@ class QuestDbIlpConformanceTests(unittest.TestCase):
         self.sql(
             f"create table {self.table} ("
             "entity_id symbol, state varchar, enabled boolean, count long, "
-            "value double, timestamp timestamp"
+            "value double, ingested_at timestamp, timestamp timestamp"
             ") timestamp(timestamp) partition by day wal"
         )
 
@@ -45,7 +45,7 @@ class QuestDbIlpConformanceTests(unittest.TestCase):
         while True:
             result = self.sql(
                 f"select entity_id, state, enabled, count, value, "
-                f"timestamp from {self.table} order by timestamp"
+                f"ingested_at, timestamp from {self.table} order by timestamp"
             )
             if result["count"] == expected or time.monotonic() >= deadline:
                 return result
@@ -62,6 +62,7 @@ class QuestDbIlpConformanceTests(unittest.TestCase):
                 "enabled": True,
                 "count": 7,
                 "value": 1.5,
+                "ingested_at": IlpTimestampMicros(1_700_000_000_123_456),
             },
             timestamp_ns=1_700_000_000_123_456_000,
         )
@@ -79,6 +80,7 @@ class QuestDbIlpConformanceTests(unittest.TestCase):
         self.assertEqual(row[3], 7)
         self.assertEqual(row[4], 1.5)
         self.assertEqual(row[5], "2023-11-14T22:13:20.123456Z")
+        self.assertEqual(row[6], "2023-11-14T22:13:20.123456Z")
 
     def test_transport_reuses_connection_for_multiple_batches(self) -> None:
         first = encode_row(

@@ -12,3 +12,4 @@ __pycache__/
 .ruff_cache/
 .venv/
 .venv-benchmark/
+.DS_Store

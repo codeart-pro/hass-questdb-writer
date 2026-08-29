@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 import unittest
 
-from custom_components.hass_questdb_writer.ilp import IlpEncodingError, encode_row
+from custom_components.hass_questdb_writer.ilp import (
+    IlpEncodingError,
+    IlpTimestampMicros,
+    encode_row,
+)
 
 
 class EncodeRowTests(unittest.TestCase):
@@ -18,6 +22,7 @@ class EncodeRowTests(unittest.TestCase):
                 "enabled": True,
                 "count": 7,
                 "value": 1.5,
+                "ingested_at": IlpTimestampMicros(1_700_000_000_123_456),
                 "missing": None,
             },
             timestamp_ns=1_700_000_000_000_000_000,
@@ -25,7 +30,8 @@ class EncodeRowTests(unittest.TestCase):
         self.assertEqual(
             result,
             b'events,entity_id=sensor.room state="on",enabled=true,count=7i,'
-            b'value=1.5 1700000000000000000\n',
+            b'value=1.5,ingested_at=1700000000123456t '
+            b'1700000000000000000\n',
         )
 
     def test_escapes_identifiers_and_strings(self) -> None:
@@ -75,5 +81,16 @@ class EncodeRowTests(unittest.TestCase):
                         "events",
                         symbols={},
                         fields={"value": value},
+                        timestamp_ns=1,
+                    )
+
+    def test_rejects_invalid_timestamp_field_range(self) -> None:
+        for value in (-(2**63), 2**63):
+            with self.subTest(value=value):
+                with self.assertRaises(IlpEncodingError):
+                    encode_row(
+                        "events",
+                        symbols={},
+                        fields={"value": IlpTimestampMicros(value)},
                         timestamp_ns=1,
                     )

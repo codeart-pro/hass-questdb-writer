@@ -83,6 +83,12 @@ The envelope contains a generated event ID, entity ID, state, selected state
 metadata, attributes, HA event timestamp, and ingestion timestamp. It contains
 plain serializable values and no live Home Assistant objects.
 
+Before entering the bounded queue, the envelope is serialized as versioned,
+deterministic UTF-8 JSON. The worker stores those exact bytes in SQLite and
+only converts them to ILP when constructing a delivery batch. Consequently, a
+serialization or ILP-encoding failure can be retained in dead-letter state
+instead of disappearing before durable persistence.
+
 If the ingress queue cannot accept an event, the runtime records an explicit
 overflow metric and follows the configured overflow policy. Silent loss is not
 allowed. Exact queue limits and the default overflow policy remain open until
@@ -104,6 +110,35 @@ One dedicated thread owns all blocking state:
 Unexpected exceptions are caught at the outer worker boundary, recorded, and
 cause a controlled degraded state. A retry-library wrapper must not be able to
 terminate the worker silently.
+
+The implementation uses an explicit internal state machine rather than a
+retry-library decorator:
+
+```text
+starting -> running -> retry_wait -> running
+                 |          |
+                 +-> blocked+
+                 |
+                 +-> stopping -> stopped
+                 |
+                 +-> failed
+```
+
+- Retryable transport failures retain the batch, record attempt metadata, and
+  schedule capped exponential backoff with bounded jitter.
+- During retry wait, newly accepted ingress continues moving to SQLite.
+- HTTP 400 on a multi-row batch narrows delivery to one row. Only a row that
+  also fails individually is moved to dead-letter.
+- Authentication and non-row permanent errors enter `blocked` while ingress
+  continues to spool within its limits.
+- Any unexpected exception reaches the outer boundary, leaves pending rows in
+  SQLite, and produces a visible `failed` snapshot.
+
+All capacities, batch thresholds, retry bounds, jitter, latency, and shutdown
+flush behavior are required constructor inputs. Runtime defaults will not be
+selected before production-rate and filesystem tests. The detailed decision is
+recorded in
+[decisions/0003-explicit-worker-state-machine.md](decisions/0003-explicit-worker-state-machine.md).
 
 ### Durable spool
 
@@ -156,6 +191,12 @@ The measured local transport comparison and its limitations are recorded in
 
 Batch flush is triggered by configurable size and latency thresholds. Concrete
 defaults will be set from local load and outage tests.
+
+`timestamp` is sent as the ILP designated timestamp in nanoseconds. Additional
+timestamp fields use QuestDB's ILP timestamp-field representation: epoch
+microseconds with a `t` suffix. Converting Home Assistant nanoseconds to these
+fields intentionally truncates sub-microsecond precision; Home Assistant state
+timestamps currently originate at microsecond resolution.
 
 ## Delivery semantics
 
@@ -222,6 +263,9 @@ unsubscribe HA listener
 
 Home Assistant shutdown must not wait indefinitely for an unavailable QuestDB.
 Persisting pending events has priority over completing remote delivery.
+Remote flush during shutdown is an explicit setting. A stop deadline returns a
+visible timeout while a network request is still blocked; the configured HTTP
+timeout remains the final bound on that request.
 
 ## QuestDB data model
 

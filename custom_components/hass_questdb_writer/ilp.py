@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 import math
 from typing import TypeAlias
 
-FieldValue: TypeAlias = str | int | float | bool | None
+
+@dataclass(frozen=True, slots=True)
+class IlpTimestampMicros:
+    """A non-designated QuestDB TIMESTAMP value in epoch microseconds."""
+
+    value: int
+
+
+FieldValue: TypeAlias = str | int | float | bool | IlpTimestampMicros | None
 
 
 class IlpEncodingError(ValueError):
@@ -52,6 +61,12 @@ def _encode_field(value: FieldValue) -> str | None:
         return None
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, IlpTimestampMicros):
+        if not -(2**63) < value.value < 2**63:
+            raise IlpEncodingError(
+                "timestamp field is outside signed 64-bit range"
+            )
+        return f"{value.value}t"
     if isinstance(value, int):
         if not -(2**63) < value < 2**63:
             raise IlpEncodingError("integer field is outside signed 64-bit range")
