@@ -26,7 +26,7 @@
     "step": {
       "init": {
         "title": "Entity filter",
-        "description": "Choose which entities are written to QuestDB. Domains and globs are comma-separated, for example: sensor, binary_sensor and sensor.kitchen_*.",
+        "description": "Choose which entities are written to QuestDB. Domains and globs are comma-separated, for example: sensor, binary_sensor and sensor.kitchen_*. Attribute patterns also support * and ?, for example: friendly_name, unit_*, rssi.",
         "data": {
           "include_entities": "Always include these entities",
           "exclude_entities": "Never include these entities",

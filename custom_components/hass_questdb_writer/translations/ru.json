@@ -26,7 +26,7 @@
     "step": {
       "init": {
         "title": "Фильтр сущностей",
-        "description": "Выберите, какие сущности писать в QuestDB. Домены и glob-шаблоны разделяются запятыми, например: sensor, binary_sensor и sensor.kitchen_*.",
+        "description": "Выберите, какие сущности писать в QuestDB. Домены и glob-шаблоны разделяются запятыми, например: sensor, binary_sensor и sensor.kitchen_*. Паттерны атрибутов тоже поддерживают * и ?, например: friendly_name, unit_*, rssi.",
         "data": {
           "include_entities": "Всегда включать эти сущности",
           "exclude_entities": "Никогда не включать эти сущности",
