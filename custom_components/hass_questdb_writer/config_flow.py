@@ -79,6 +79,12 @@ from .const import (
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
 
+from .transport import (
+    AuthenticationIlpError,
+    IlpHttpTransport,
+    IlpTransportError,
+)
+
 
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated input into stripped non-empty parts."""
@@ -275,6 +281,31 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    async def _test_connection(self, data: dict[str, Any]) -> None:
+        """Probe QuestDB with the given settings; raise on failure.
+
+        Uses the same transport and error classification as the worker, so
+        the form reports exactly what delivery would experience.
+        """
+        transport = IlpHttpTransport(
+            data[CONF_HOST],
+            data[CONF_PORT],
+            use_tls=data[CONF_USE_TLS],
+            timeout_seconds=PROVISIONAL_HTTP_TIMEOUT_SECONDS,
+            username=data.get(CONF_USERNAME) or None,
+            password=data.get(CONF_PASSWORD) or None,
+        )
+        await self.hass.async_add_executor_job(transport.exec_query, "select 1")
+
+    def _reject(
+        self, user_input: dict[str, Any], error: str
+    ) -> config_entries.ConfigFlowResult:
+        return self.async_show_form(
+            step_id="user",
+            data_schema=_user_schema(user_input),
+            errors={"base": error},
+        )
+
     async def async_step_reconfigure(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -320,6 +351,12 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_USERNAME: username,
                 CONF_PASSWORD: password,
             }
+            try:
+                await self._test_connection(new_data)
+            except AuthenticationIlpError:
+                return self._reject(user_input, "invalid_auth")
+            except IlpTransportError:
+                return self._reject(user_input, "cannot_connect")
             if reconfigure_entry is not None:
                 return self.async_update_reload_and_abort(
                     reconfigure_entry,

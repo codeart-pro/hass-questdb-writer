@@ -11,6 +11,10 @@ from custom_components.hass_questdb_writer.config_flow import (
     HassQuestDbWriterConfigFlow,
     HassQuestDbWriterOptionsFlow,
 )
+from custom_components.hass_questdb_writer.transport import (
+    AuthenticationIlpError,
+    IlpTransportError,
+)
 from custom_components.hass_questdb_writer.const import (
     CONF_ATTRIBUTE_ALLOWLIST,
     CONF_ATTRIBUTE_DENYLIST,
@@ -81,7 +85,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             self.user_input({CONF_USERNAME: "user"})
         )
         self.assertEqual(result["errors"], {"base": "invalid_auth_pair"})
-        with patch.object(flow, "async_set_unique_id", AsyncMock()):
+        with (
+            patch.object(flow, "async_set_unique_id", AsyncMock()),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
             result = await flow.async_step_user(
                 self.user_input({CONF_USERNAME: "user", CONF_PASSWORD: "pass"})
             )
@@ -94,6 +101,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(flow, "async_set_unique_id", AsyncMock()),
             patch.object(flow, "_abort_if_unique_id_configured", Mock()),
+            patch.object(flow, "_test_connection", AsyncMock()),
         ):
             result = await flow.async_step_user(self.user_input())
         self.assertEqual(result["data"][CONF_USERNAME], None)
@@ -110,6 +118,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
                 "_abort_if_unique_id_configured",
                 abort_if_configured,
             ),
+            patch.object(flow, "_test_connection", AsyncMock()),
         ):
             result = await flow.async_step_user(
                 self.user_input(
@@ -166,7 +175,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
-        with patch.object(flow, "async_update_reload_and_abort", update):
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
             result = await flow.async_step_user(
                 {
                     CONF_HOST: "questdb2",
@@ -200,7 +212,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         update = Mock(return_value={"type": "abort"})
-        with patch.object(flow, "async_update_reload_and_abort", update):
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
             result = await flow.async_step_user(
                 {
                     CONF_HOST: "questdb",
@@ -228,6 +243,37 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             self.user_input({CONF_USERNAME: "user"})
         )
         self.assertEqual(result["errors"], {"base": "invalid_auth_pair"})
+
+    async def test_unreachable_server_keeps_form_with_input(self) -> None:
+        flow = HassQuestDbWriterConfigFlow()
+        with patch.object(
+            flow,
+            "_test_connection",
+            AsyncMock(side_effect=IlpTransportError("down", retryable=True, delivery_uncertain=False)),
+        ):
+            result = await flow.async_step_user(
+                self.user_input({CONF_HOST: "nope"})
+            )
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"], {"base": "cannot_connect"})
+        self.assertEqual(result["data_schema"]({})[CONF_HOST], "nope")
+
+    async def test_rejected_credentials_keep_form(self) -> None:
+        flow = HassQuestDbWriterConfigFlow()
+        with patch.object(
+            flow,
+            "_test_connection",
+            AsyncMock(
+                side_effect=AuthenticationIlpError(
+                    "401", retryable=False, delivery_uncertain=False, status_code=401
+                )
+            ),
+        ):
+            result = await flow.async_step_user(
+                self.user_input({CONF_USERNAME: "user", CONF_PASSWORD: "bad"})
+            )
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"], {"base": "invalid_auth"})
 
 
 class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):

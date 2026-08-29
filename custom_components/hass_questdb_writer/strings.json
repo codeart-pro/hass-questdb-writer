@@ -16,7 +16,9 @@
     },
     "error": {
       "invalid_connection": "Enter a non-empty host and table. The UTF-8 table name must not exceed 127 bytes.",
-      "invalid_auth_pair": "Either provide both a username and a password, or leave both empty."
+      "invalid_auth_pair": "Either provide both a username and a password, or leave both empty.",
+      "cannot_connect": "QuestDB is not reachable with these settings. Check the host, port, and TLS setting.",
+      "invalid_auth": "QuestDB rejected these credentials. Check the username and password."
     },
     "abort": {
       "already_configured": "This QuestDB destination and table are already configured."
