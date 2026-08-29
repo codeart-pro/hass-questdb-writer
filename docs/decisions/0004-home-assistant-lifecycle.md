@@ -1,6 +1,9 @@
 # ADR 0004: Bind one writer to one Home Assistant config entry
 
 Status: accepted for the `0.1.0-dev0` local runtime.
+Partially superseded by [ADR 0005](0005-questdb-record-format.md): the
+designated timestamp mapping (section "Timestamp mapping") is replaced by the
+deduplicated `last_updated` record format.
 
 Date: 2026-08-29
 

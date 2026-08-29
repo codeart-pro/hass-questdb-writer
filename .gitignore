@@ -7,6 +7,7 @@ dev/homeassistant/home-assistant.log*
 dev/homeassistant/home-assistant_v2.db*
 dev/homeassistant/qemu_*.core
 dev/homeassistant/secrets.yaml
+dev/scratch/
 __pycache__/
 *.py[cod]
 .pytest_cache/

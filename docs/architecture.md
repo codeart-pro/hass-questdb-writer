@@ -195,11 +195,13 @@ The measured local transport comparison and its limitations are recorded in
 Batch flush is triggered by configurable size and latency thresholds. Concrete
 defaults will be set from local load and outage tests.
 
-`timestamp` is sent as the ILP designated timestamp in nanoseconds. Additional
-timestamp fields use QuestDB's ILP timestamp-field representation: epoch
-microseconds with a `t` suffix. Converting Home Assistant nanoseconds to these
-fields intentionally truncates sub-microsecond precision; Home Assistant state
-timestamps currently originate at microsecond resolution.
+The HA state object's `last_updated` is sent as the ILP designated timestamp
+in nanoseconds and doubles as the first part of the deduplication key. The
+remaining timestamp fields use QuestDB's ILP timestamp-field representation:
+epoch microseconds with a `t` suffix. Converting Home Assistant nanoseconds to
+these fields intentionally truncates sub-microsecond precision; Home Assistant
+state timestamps currently originate at microsecond resolution. The record
+format is fixed by [ADR 0005](decisions/0005-questdb-record-format.md).
 
 ## Delivery semantics
 
@@ -213,9 +215,11 @@ The target guarantee is **at least once from the durable spool**:
 - If QuestDB commits a batch but the client loses the acknowledgement, retrying
   can create duplicates.
 
-Every event therefore carries a stable `event_id`. This makes duplicates
-detectable in queries and leaves room for a future deduplication process, but it
-does not by itself make QuestDB ILP writes exactly once.
+Every event carries a stable `event_id`, and the table is declared with
+`DEDUP UPSERT KEYS(last_updated, entity_id)`. The spool stores the exact
+serialized payload, so a retried row is byte-identical to the original and
+QuestDB deduplication makes uncertain retries exactly once at the database
+level. `event_id` remains available for analysis and duplicate inspection.
 
 ## Failure handling
 
@@ -272,24 +276,24 @@ timeout remains the final bound on that request.
 
 ## QuestDB data model
 
-Initial logical columns:
+Logical columns (fixed by
+[ADR 0005](decisions/0005-questdb-record-format.md)):
 
-| Column | Purpose | Candidate type |
+| Column | Purpose | Type |
 |---|---|---|
-| `timestamp` | Home Assistant state timestamp | `TIMESTAMP` designated timestamp |
-| `ingested_at` | Time accepted by this integration | `TIMESTAMP` |
-| `event_id` | Stable ID for duplicate detection | `VARCHAR` |
-| `entity_id` | Full HA entity ID | `SYMBOL` candidate |
-| `domain` | HA entity domain | `SYMBOL` candidate |
+| `last_updated` | HA state object time; designated timestamp and dedup key | `TIMESTAMP` designated |
+| `entity_id` | Full HA entity ID; dedup key | `SYMBOL` |
+| `domain` | HA entity domain | `SYMBOL` |
 | `state` | State value without forced numeric conversion | `VARCHAR` |
 | `attributes` | Serialized selected attributes | `VARCHAR` |
-| `last_changed` | HA state metadata | `TIMESTAMP` |
-| `last_updated` | HA state metadata | `TIMESTAMP` |
+| `event_id` | Stable HA event ID for analysis and duplicate inspection | `VARCHAR` |
 | `context_id` | HA context correlation when present | `VARCHAR` |
+| `ingested_at` | Time accepted by this integration | `TIMESTAMP` |
+| `last_changed` | HA state metadata | `TIMESTAMP` |
 
-Symbol choices, partitioning, WAL mode, attribute policy, and table name are
-provisional. They will be validated against production cardinality and query
-patterns before a migration schema is declared stable. The development table
+The table is WAL, partitioned by day, and declared with
+`DEDUP UPSERT KEYS(last_updated, entity_id)`, which makes retried delivery and
+restored-state replays idempotent at the database level. The development table
 name is `hass_questdb_writer_events`.
 
 ## Configuration model
