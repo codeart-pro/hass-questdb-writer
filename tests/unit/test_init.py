@@ -40,7 +40,10 @@ class ConfigEntrySetupTests(unittest.IsolatedAsyncioTestCase):
                 CONF_TABLE: "ha_events",
                 CONF_USE_TLS: False,
             },
+            options={},
             runtime_data=None,
+            async_on_unload=lambda _callback: None,
+            add_update_listener=lambda _listener: lambda: None,
         )
 
     def test_maps_entry_to_explicit_provisional_profile(self) -> None:

@@ -314,24 +314,29 @@ is reloaded; an unreachable server only delays delivery with backoff.
 
 ## Configuration model
 
-The config entry will own:
+All configuration is UI-driven (config entry + options flow, fixed by
+[ADR 0007](decisions/0007-ui-driven-configuration.md)). The config entry
+owns:
 
-- QuestDB URL and authentication material;
-- target table;
-- include/exclude filters;
-- batching thresholds;
-- retry bounds;
-- spool limits and overflow policy;
-- attribute inclusion policy.
+- QuestDB URL, TLS, and HTTP Basic authentication material
+  (`username`/`password`, optional and stored in the config entry);
+- the target table.
+
+The options flow owns:
+
+- the include/exclude entity filter (entities, domains, globs) applied at
+  the listener with Home Assistant's standard `EntityFilter` semantics;
+- the batching, retry, spool, and timeout limits, exposed behind a
+  "Show advanced settings" step; every value defaults to the matching
+  `PROVISIONAL_*` constant, so older entries keep working without migration.
 
 Secrets are stored through Home Assistant's config-entry mechanisms and are
-redacted from logs and diagnostics. Changes that alter connection ownership or
-schema trigger a controlled reload.
-
-The current `0.1.0-dev0` runtime has a deliberately named `PROVISIONAL_*`
-development profile. Its queue, spool, retry, timeout, and batch values exist
-to run the local end-to-end integration; they are not declared supported
-production defaults. The profile and remaining measurements are recorded in
+redacted from logs and diagnostics. Saving options reloads the entry; changes
+that alter connection ownership or schema require re-adding the entry. The
+current `0.1.0-dev0` runtime has a deliberately named `PROVISIONAL_*`
+development profile as the options defaults; the values are not declared
+supported production defaults. The profile and remaining measurements are
+recorded in
 [decisions/0004-home-assistant-lifecycle.md](decisions/0004-home-assistant-lifecycle.md).
 
 ## Observability

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import datetime as dt
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ import unittest
 
 from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNKNOWN
 from homeassistant.core import Context, Event, State
+from homeassistant.helpers.entityfilter import convert_include_exclude_filter
 
 from custom_components.hass_questdb_writer.event import EventEnvelope
 from custom_components.hass_questdb_writer.runtime import (
@@ -291,6 +293,98 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.state_events_skipped_unknown, 1)
         self.assertEqual(snapshot.state_events_accepted, 0)
         self.assertEqual(self.service.events, [])
+        await runtime.async_stop()
+
+    async def test_entity_filter_excludes_entities(self) -> None:
+        configuration = replace(
+            self.configuration(),
+            entity_filter=convert_include_exclude_filter(
+                {
+                    "include": {
+                        "domains": [],
+                        "entity_globs": [],
+                        "entities": ["sensor.kitchen"],
+                    },
+                    "exclude": {
+                        "domains": ["binary_sensor"],
+                        "entity_globs": [],
+                        "entities": [],
+                    },
+                }
+            ),
+        )
+        runtime = HassQuestDbRuntime(
+            self.hass,  # type: ignore[arg-type]
+            configuration,
+            service_factory=lambda: self.service,  # type: ignore[arg-type,return-value]
+            event_id_factory=lambda: "event-fixed",
+            wall_time_ns=lambda: 1_700_000_000_500_000_000,
+        )
+        await runtime.async_start()
+        for entity_id, state in (
+            ("sensor.kitchen", "on"),
+            ("binary_sensor.door", "on"),
+            ("sensor.garden", "42"),
+        ):
+            event = Event(
+                EVENT_STATE_CHANGED,
+                {
+                    "entity_id": entity_id,
+                    "old_state": None,
+                    "new_state": State(entity_id, state),
+                },
+            )
+            self.hass.bus.listener(event)
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot.state_events_seen, 3)
+        self.assertEqual(snapshot.state_events_excluded, 1)
+        self.assertEqual(snapshot.state_events_accepted, 2)
+        self.assertEqual(
+            [event.entity_id for event in self.service.events],
+            ["sensor.kitchen", "sensor.garden"],
+        )
+        await runtime.async_stop()
+
+    async def test_entity_include_list_is_an_allowlist(self) -> None:
+        configuration = replace(
+            self.configuration(),
+            entity_filter=convert_include_exclude_filter(
+                {
+                    "include": {
+                        "domains": [],
+                        "entity_globs": [],
+                        "entities": ["sensor.kitchen"],
+                    },
+                    "exclude": {
+                        "domains": [],
+                        "entity_globs": [],
+                        "entities": [],
+                    },
+                }
+            ),
+        )
+        runtime = HassQuestDbRuntime(
+            self.hass,  # type: ignore[arg-type]
+            configuration,
+            service_factory=lambda: self.service,  # type: ignore[arg-type,return-value]
+            event_id_factory=lambda: "event-fixed",
+            wall_time_ns=lambda: 1_700_000_000_500_000_000,
+        )
+        await runtime.async_start()
+        for entity_id in ("sensor.kitchen", "sensor.garden"):
+            event = Event(
+                EVENT_STATE_CHANGED,
+                {
+                    "entity_id": entity_id,
+                    "old_state": None,
+                    "new_state": State(entity_id, "on"),
+                },
+            )
+            self.hass.bus.listener(event)
+        snapshot = runtime.snapshot()
+        self.assertEqual(snapshot.state_events_excluded, 1)
+        self.assertEqual(snapshot.state_events_accepted, 1)
+        self.assertEqual(self.service.events[0].entity_id, "sensor.kitchen")
         await runtime.async_stop()
 
     async def test_conversion_failure_does_not_escape_event_callback(self) -> None:

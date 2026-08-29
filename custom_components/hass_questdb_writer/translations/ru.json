@@ -3,20 +3,70 @@
     "step": {
       "user": {
         "title": "Подключение HASS QuestDB Writer",
-        "description": "Настройте адрес QuestDB ILP/HTTP.",
+        "description": "Настройте адрес QuestDB ILP/HTTP. Оставьте поля учётных данных пустыми, если QuestDB работает без аутентификации.",
         "data": {
           "host": "Адрес QuestDB",
           "port": "HTTP-порт",
           "table": "Таблица",
-          "use_tls": "Использовать HTTPS"
+          "use_tls": "Использовать HTTPS",
+          "username": "Имя пользователя (необязательно)",
+          "password": "Пароль (необязательно)"
         }
       }
     },
     "error": {
-      "invalid_connection": "Укажите адрес и таблицу. Имя таблицы в UTF-8 не должно превышать 127 байт."
+      "invalid_connection": "Укажите адрес и таблицу. Имя таблицы в UTF-8 не должно превышать 127 байт.",
+      "invalid_auth_pair": "Укажите одновременно имя пользователя и пароль, либо оставьте оба поля пустыми."
     },
     "abort": {
       "already_configured": "Это назначение QuestDB и таблица уже настроены."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Фильтр сущностей",
+        "description": "Выберите, какие сущности писать в QuestDB. Домены и glob-шаблоны разделяются запятыми, например: sensor, binary_sensor и sensor.kitchen_*.",
+        "data": {
+          "include_entities": "Всегда включать эти сущности",
+          "exclude_entities": "Никогда не включать эти сущности",
+          "include_domains": "Всегда включать эти домены",
+          "exclude_domains": "Никогда не включать эти домены",
+          "include_entity_globs": "Всегда включать эти glob-шаблоны",
+          "exclude_entity_globs": "Никогда не включать эти glob-шаблоны",
+          "show_advanced": "Показать расширенные настройки"
+        }
+      },
+      "advanced": {
+        "title": "Расширенные настройки",
+        "description": "Экспериментальные пределы настройки. Значения по умолчанию — профиль разработки, для продакшена ещё не валидированы.",
+        "data": {
+          "ingress_queue_capacity": "Ёмкость входной очереди (событий)",
+          "max_serialized_event_bytes": "Максимальный размер события (байт)",
+          "persist_batch_rows": "Размер батча персистентности (строк)",
+          "delivery_batch_rows": "Размер батча доставки (строк)",
+          "delivery_batch_bytes": "Размер батча доставки (байт)",
+          "flush_interval_seconds": "Интервал сброса (секунд)",
+          "retry_initial_seconds": "Начальная задержка ретрая (секунд)",
+          "retry_max_seconds": "Максимальная задержка ретрая (секунд)",
+          "retry_multiplier": "Множитель задержки ретрая",
+          "retry_jitter_ratio": "Доля джиттера ретрая",
+          "flush_on_shutdown": "Сбросить батч при остановке",
+          "max_pending_rows": "Ёмкость спула (строк)",
+          "max_pending_bytes": "Ёмкость спула (байт)",
+          "max_dead_letter_rows": "Ёмкость dead-letter (строк)",
+          "max_dead_letter_bytes": "Ёмкость dead-letter (байт)",
+          "sqlite_busy_timeout_seconds": "Таймаут занятости SQLite (секунд)",
+          "http_timeout_seconds": "HTTP-таймаут (секунд)",
+          "start_timeout_seconds": "Таймаут запуска (секунд)",
+          "stop_timeout_seconds": "Таймаут остановки (секунд)"
+        }
+      }
+    },
+    "error": {
+      "invalid_filter": "Фильтр сущностей некорректен.",
+      "invalid_retry_bounds": "Максимальная задержка ретрая не должна быть меньше начальной.",
+      "invalid_size_bounds": "Максимальный размер события не должен превышать ёмкость dead-letter в байтах."
     }
   }
 }

@@ -21,6 +21,7 @@ from homeassistant.core import (
     HomeAssistant,
     callback,
 )
+from homeassistant.helpers.entityfilter import EntityFilter
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.json import json_dumps
 
@@ -70,6 +71,7 @@ class RuntimeConfiguration:
     start_timeout_seconds: float
     stop_timeout_seconds: float
     tracked_entity_ids: tuple[str, ...] | None
+    entity_filter: EntityFilter | None = None
 
     def __post_init__(self) -> None:
         if not self.table:
@@ -102,6 +104,7 @@ class RuntimeSnapshot:
     state_events_accepted: int
     state_events_without_new_state: int
     state_events_skipped_unknown: int
+    state_events_excluded: int
     conversion_errors: int
     submission_rejections: int
     worker: WorkerSnapshot
@@ -147,6 +150,7 @@ class HassQuestDbRuntime:
         self._events_accepted = 0
         self._events_without_new_state = 0
         self._events_skipped_unknown = 0
+        self._events_excluded = 0
         self._conversion_errors = 0
         self._submission_rejections = 0
 
@@ -265,6 +269,10 @@ class HassQuestDbRuntime:
         if new_state is None:
             self._events_without_new_state += 1
             return
+        entity_filter = self._configuration.entity_filter
+        if entity_filter is not None and not entity_filter(new_state.entity_id):
+            self._events_excluded += 1
+            return
         if new_state.state == STATE_UNKNOWN:
             self._events_skipped_unknown += 1
             return
@@ -310,6 +318,7 @@ class HassQuestDbRuntime:
             state_events_accepted=self._events_accepted,
             state_events_without_new_state=self._events_without_new_state,
             state_events_skipped_unknown=self._events_skipped_unknown,
+            state_events_excluded=self._events_excluded,
             conversion_errors=self._conversion_errors,
             submission_rejections=self._submission_rejections,
             worker=self._service.snapshot(),

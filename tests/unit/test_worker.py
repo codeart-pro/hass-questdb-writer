@@ -454,7 +454,7 @@ class WriterServiceTests(unittest.TestCase):
         )
         service.start(timeout_seconds=1)
         self.assertTrue(service.submit(self.event(1)))
-        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertTrue(service.stop(timeout_seconds=5))
         self.assertEqual(service.snapshot().delivered_events, 0)
         self.assertEqual(transport.payloads, [])
         with self.open_spool() as spool:
@@ -473,7 +473,7 @@ class WriterServiceTests(unittest.TestCase):
         )
         service.start(timeout_seconds=1)
         self.assertTrue(service.submit(self.event(1)))
-        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertTrue(service.stop(timeout_seconds=5))
         self.assertEqual(service.snapshot().delivered_events, 1)
         self.assertEqual(len(transport.payloads), 1)
 

@@ -365,7 +365,7 @@ class WriterService:
                 failure = self._failure
                 message = self._last_error or "worker initialization failed"
                 raise WorkerStartError(message) from failure
-            if self._state is not WorkerState.RUNNING:
+            if self._state in (WorkerState.NEW, WorkerState.STARTING):
                 raise WorkerStartError(
                     f"worker entered unexpected state {self._state.value}"
                 )

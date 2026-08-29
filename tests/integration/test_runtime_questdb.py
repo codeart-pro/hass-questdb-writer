@@ -240,6 +240,70 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(entry.state, ConfigEntryState.NOT_LOADED)
 
+    async def test_options_flow_entity_filter_is_applied_after_reload(self) -> None:
+        form = await self.hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+        )
+        result = await self.hass.config_entries.flow.async_configure(
+            form["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: self.table,
+                CONF_USE_TLS: False,
+            },
+        )
+        entry = result["result"]
+        self.addAsyncCleanup(self._unload_entry, entry)
+        await self.hass.async_block_till_done()
+        first_runtime = entry.runtime_data
+
+        options_form = await self.hass.config_entries.options.async_init(
+            entry.entry_id
+        )
+        result = await self.hass.config_entries.options.async_configure(
+            options_form["flow_id"],
+            {
+                "include_entities": ["input_boolean.questdb_test"],
+                "exclude_entities": [],
+                "include_domains": "",
+                "exclude_domains": "",
+                "include_entity_globs": "",
+                "exclude_entity_globs": "",
+                "show_advanced": False,
+            },
+        )
+        self.assertEqual(result["type"], "create_entry")
+
+        reload_deadline = time.monotonic() + 5
+        while getattr(entry, "runtime_data", None) is first_runtime:
+            if time.monotonic() >= reload_deadline:
+                self.fail("options change did not reload the entry")
+            await asyncio.sleep(0.01)
+
+        self.hass.states.async_set("input_boolean.questdb_test", "on")
+        self.hass.states.async_set("sensor.filtered_out", "42")
+        await self.hass.async_block_till_done()
+
+        deadline = time.monotonic() + 5
+        while True:
+            result = self.sql_maybe(
+                f"select entity_id, state from {self.table} "
+                f"where entity_id in "
+                f"('input_boolean.questdb_test', 'sensor.filtered_out')"
+            )
+            if (result or {}).get("count") == 1 or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.01)
+        assert result is not None
+        self.assertEqual(
+            result["dataset"],
+            [["input_boolean.questdb_test", "on"]],
+        )
+        snapshot = entry.runtime_data.snapshot()
+        self.assertEqual(snapshot.state_events_excluded, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
