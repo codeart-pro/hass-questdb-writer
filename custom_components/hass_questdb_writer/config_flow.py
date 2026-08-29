@@ -171,6 +171,21 @@ def _filter_side(user_input: dict[str, Any], include: bool) -> dict[str, Any]:
     }
 
 
+def _overlapping_pairs(include: dict, exclude: dict, allow: list, deny: list) -> str:
+    """Return a human-readable description of list overlaps, or an empty string."""
+    parts: list[str] = []
+    for label, left, right in (
+        ("entities", include.get(CONF_ENTITIES, []), exclude.get(CONF_ENTITIES, [])),
+        ("domains", include.get(CONF_DOMAINS, []), exclude.get(CONF_DOMAINS, [])),
+        ("globs", include.get(CONF_ENTITY_GLOBS, []), exclude.get(CONF_ENTITY_GLOBS, [])),
+        ("attributes", allow, deny),
+    ):
+        overlap = sorted(set(left) & set(right))
+        if overlap:
+            parts.append(f"{label}: {', '.join(overlap)}")
+    return "; ".join(parts)
+
+
 def _init_schema(
     options: dict[str, Any], domain_options: list[dict[str, str]]
 ) -> vol.Schema:
@@ -441,16 +456,31 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             include = _filter_side(user_input, include=True)
             exclude = _filter_side(user_input, include=False)
+            attribute_allow = _split_csv(
+                user_input.get(CONF_ATTRIBUTE_ALLOWLIST, "")
+            )
+            attribute_deny = _split_csv(
+                user_input.get(CONF_ATTRIBUTE_DENYLIST, "")
+            )
             self._filter_options = {
                 CONF_INCLUDE: include,
                 CONF_EXCLUDE: exclude,
-                CONF_ATTRIBUTE_ALLOWLIST: _split_csv(
-                    user_input.get(CONF_ATTRIBUTE_ALLOWLIST, "")
-                ),
-                CONF_ATTRIBUTE_DENYLIST: _split_csv(
-                    user_input.get(CONF_ATTRIBUTE_DENYLIST, "")
-                ),
+                CONF_ATTRIBUTE_ALLOWLIST: attribute_allow,
+                CONF_ATTRIBUTE_DENYLIST: attribute_deny,
             }
+            overlaps = _overlapping_pairs(
+                include, exclude, attribute_allow, attribute_deny
+            )
+            if overlaps:
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=_init_schema(
+                        self._entry.options,
+                        await _domain_selector_options(self.hass),
+                    ),
+                    errors={"base": "overlapping_filters"},
+                    description_placeholders={"conflicts": overlaps},
+                )
             try:
                 INCLUDE_EXCLUDE_BASE_FILTER_SCHEMA(
                     {

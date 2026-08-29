@@ -340,7 +340,7 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
             flow,
             self.filter_input(
                 {
-                    CONF_ATTRIBUTE_ALLOWLIST: "friendly_name, unit_*, rssi",
+                    CONF_ATTRIBUTE_ALLOWLIST: "friendly_name, unit_*",
                     CONF_ATTRIBUTE_DENYLIST: "rssi, linkquality",
                 }
             ),
@@ -348,7 +348,7 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(
             result["data"][CONF_ATTRIBUTE_ALLOWLIST],
-            ["friendly_name", "unit_*", "rssi"],
+            ["friendly_name", "unit_*"],
         )
         self.assertEqual(
             result["data"][CONF_ATTRIBUTE_DENYLIST],
@@ -373,6 +373,65 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result["data"][CONF_INCLUDE]["entities"], ["sensor.kitchen"]
         )
+
+    async def test_overlapping_entities_are_rejected(self) -> None:
+        flow = self.flow()
+        result = await self._init(
+            flow,
+            self.filter_input(
+                {"exclude_entities": ["sensor.kitchen"]}
+            ),
+        )
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        self.assertIn("entities: sensor.kitchen", result["description_placeholders"]["conflicts"])
+
+    async def test_overlapping_attributes_are_rejected(self) -> None:
+        flow = self.flow()
+        result = await self._init(
+            flow,
+            self.filter_input(
+                {
+                    CONF_ATTRIBUTE_ALLOWLIST: "friendly_name, rssi",
+                    CONF_ATTRIBUTE_DENYLIST: "rssi, linkquality",
+                }
+            ),
+        )
+        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        self.assertIn("attributes: rssi", result["description_placeholders"]["conflicts"])
+
+    async def test_overlapping_domains_and_globs_are_rejected(self) -> None:
+        flow = self.flow()
+        result = await self._init(
+            flow,
+            self.filter_input(
+                {
+                    "include_domains": "sensor",
+                    "exclude_domains": "sensor, binary_sensor",
+                    "exclude_entity_globs": "sensor.garden_*",
+                }
+            ),
+        )
+        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        conflicts = result["description_placeholders"]["conflicts"]
+        self.assertIn("domains: sensor", conflicts)
+        self.assertIn("globs: sensor.garden_*", conflicts)
+
+    async def test_identical_items_in_include_and_exclude_entities(self) -> None:
+        flow = self.flow()
+        result = await self._init(
+            flow,
+            self.filter_input(
+                {
+                    "include_entities": ["sensor.kitchen", "sensor.garden"],
+                    "exclude_entities": ["sensor.kitchen"],
+                }
+            ),
+        )
+        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        conflicts = result["description_placeholders"]["conflicts"]
+        self.assertIn("sensor.kitchen", conflicts)
+        self.assertNotIn("sensor.garden", conflicts)
 
     async def test_advanced_rejects_retry_bounds_inversion(self) -> None:
         flow = self.flow()
