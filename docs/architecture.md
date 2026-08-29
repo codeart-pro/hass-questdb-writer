@@ -322,6 +322,10 @@ owns:
   (`username`/`password`, optional and stored in the config entry);
 - the target table.
 
+The connection parameters can be changed at any time through the
+**Reconfigure** flow (reuses the user step; empty credential fields keep
+the stored secret). Options are changed through **Configure**.
+
 The options flow owns:
 
 - the include/exclude entity filter (entities, domains, globs) applied at

@@ -7,6 +7,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.config_entries import SOURCE_RECONFIGURE
 from homeassistant.const import (
     CONF_DOMAINS,
     CONF_ENTITIES,
@@ -274,26 +275,55 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle reconfiguration of an existing entry."""
+        return await self.async_step_user(user_input)
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Handle the initial configuration step."""
+        reconfigure_entry: config_entries.ConfigEntry | None = None
+        if self.source == SOURCE_RECONFIGURE:
+            reconfigure_entry = self._get_reconfigure_entry()
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
             table = user_input[CONF_TABLE].strip()
             username = (user_input.get(CONF_USERNAME) or "").strip() or None
             password = user_input.get(CONF_PASSWORD) or None
+            if reconfigure_entry is not None:
+                # Empty credentials keep the stored ones, so the secret is
+                # never exposed in the form.
+                existing = reconfigure_entry.data
+                if username is None and existing.get(CONF_USERNAME):
+                    username = existing[CONF_USERNAME]
+                if password is None and existing.get(CONF_PASSWORD):
+                    password = existing[CONF_PASSWORD]
             if not host or not table or len(table.encode("utf-8")) > 127:
                 return self.async_show_form(
                     step_id="user",
                     data_schema=_user_schema(user_input),
                     errors={"base": "invalid_connection"},
                 )
-            if (username is None) != (password is None):
+            if bool(username) != bool(password):
                 return self.async_show_form(
                     step_id="user",
                     data_schema=_user_schema(user_input),
                     errors={"base": "invalid_auth_pair"},
+                )
+            new_data = {
+                **user_input,
+                CONF_HOST: host,
+                CONF_TABLE: table,
+                CONF_USERNAME: username,
+                CONF_PASSWORD: password,
+            }
+            if reconfigure_entry is not None:
+                return self.async_update_reload_and_abort(
+                    reconfigure_entry,
+                    data=new_data,
                 )
             scheme = "https" if user_input[CONF_USE_TLS] else "http"
             await self.async_set_unique_id(
@@ -302,16 +332,15 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
                 title=f"QuestDB at {host}",
-                data={
-                    **user_input,
-                    CONF_HOST: host,
-                    CONF_TABLE: table,
-                    CONF_USERNAME: username,
-                    CONF_PASSWORD: password,
-                },
+                data=new_data,
             )
 
-        return self.async_show_form(step_id="user", data_schema=_user_schema({}))
+        defaults = (
+            {**reconfigure_entry.data, CONF_PASSWORD: ""}
+            if reconfigure_entry is not None
+            else {}
+        )
+        return self.async_show_form(step_id="user", data_schema=_user_schema(defaults))
 
     @staticmethod
     def async_get_options_flow(

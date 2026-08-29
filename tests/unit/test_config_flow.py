@@ -5,6 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, Mock, patch
 import unittest
 
+from homeassistant.config_entries import SOURCE_RECONFIGURE
+
 from custom_components.hass_questdb_writer.config_flow import (
     HassQuestDbWriterConfigFlow,
     HassQuestDbWriterOptionsFlow,
@@ -120,6 +122,112 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["title"], "QuestDB at QuestDB")
         self.assertEqual(result["data"][CONF_HOST], "QuestDB")
         self.assertEqual(result["data"][CONF_TABLE], "events")
+
+    def _reconfigure_flow(self, entry_data: dict) -> HassQuestDbWriterConfigFlow:
+        entry = Mock(data=entry_data)
+        flow = HassQuestDbWriterConfigFlow()
+        flow.context = {"source": SOURCE_RECONFIGURE, "entry_id": "entry-1"}
+        flow.hass = Mock(
+            config_entries=Mock(
+                async_get_known_entry=Mock(return_value=entry)
+            )
+        )
+        return flow
+
+    async def test_reconfigure_prefills_data_and_hides_secret(self) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "secret",
+            }
+        )
+        result = await flow.async_step_user()
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["step_id"], "user")
+        defaults = result["data_schema"]({})
+        self.assertEqual(defaults[CONF_HOST], "questdb")
+        self.assertEqual(defaults[CONF_PORT], 9000)
+        self.assertEqual(defaults[CONF_USERNAME], "admin")
+        self.assertEqual(defaults[CONF_PASSWORD], "")
+
+    async def test_reconfigure_updates_entry_and_keeps_stored_secret(self) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "secret",
+            }
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with patch.object(flow, "async_update_reload_and_abort", update):
+            result = await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb2",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertEqual(result["type"], "abort")
+        update.assert_called_once()
+        call = update.call_args
+        self.assertEqual(call[0][0].data[CONF_PASSWORD], "secret")
+        new_data = call.kwargs["data"]
+        self.assertEqual(new_data[CONF_HOST], "questdb2")
+        self.assertEqual(new_data[CONF_PORT], 9001)
+        self.assertEqual(new_data[CONF_USE_TLS], True)
+        self.assertEqual(new_data[CONF_USERNAME], "admin")
+        self.assertEqual(new_data[CONF_PASSWORD], "secret")
+
+    async def test_reconfigure_can_replace_credentials(self) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "secret",
+            }
+        )
+        update = Mock(return_value={"type": "abort"})
+        with patch.object(flow, "async_update_reload_and_abort", update):
+            result = await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "newuser",
+                    CONF_PASSWORD: "newpass",
+                }
+            )
+        self.assertEqual(result["type"], "abort")
+        self.assertEqual(update.call_args.kwargs["data"][CONF_USERNAME], "newuser")
+        self.assertEqual(update.call_args.kwargs["data"][CONF_PASSWORD], "newpass")
+
+    async def test_reconfigure_rejects_auth_pair_without_stored_secret(self) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+            }
+        )
+        result = await flow.async_step_user(
+            self.user_input({CONF_USERNAME: "user"})
+        )
+        self.assertEqual(result["errors"], {"base": "invalid_auth_pair"})
 
 
 class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):

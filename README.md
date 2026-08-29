@@ -50,7 +50,10 @@ Copy `custom_components/hass_questdb_writer/` into your Home Assistant
 3. Finish the flow. The worker creates the table on first delivery; nothing
    is written until the schema is created and validated.
 
-### Options (Configure)
+The connection parameters can be changed later via the **Reconfigure**
+action; filtering and tuning options live in **Configure**.
+
+## Options (Configure)
 
 - **Include / exclude** — entities, domains, globs (include-only acts as a
   strict allowlist; excludes cut, everything else is written)
