@@ -355,6 +355,14 @@ Diagnostics expose at least:
 Logs are structured around state transitions and are rate-limited during long
 outages. Per-event success logging is disabled outside targeted debugging.
 
+## Development environment
+
+The local podman stack (`compose.yaml`) runs QuestDB, Home Assistant, and
+Grafana with the integration mounted live from the repository. Ports, the
+Grafana credentials (`test`/`test`), the provisioning files, the live-run
+checklist, and the test commands are described in
+[development.md](development.md).
+
 ## Testing strategy
 
 ### Unit tests

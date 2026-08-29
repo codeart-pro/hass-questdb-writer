@@ -5,6 +5,7 @@ services:
       - "19000:9000"
       - "19009:9009"
       - "19003:9003"
+      - "18812:8812"
     volumes:
       - questdb-data:/var/lib/questdb
 
@@ -21,5 +22,22 @@ services:
       - ./dev/homeassistant:/config
       - ./custom_components/hass_questdb_writer:/config/custom_components/hass_questdb_writer:ro
 
+  grafana:
+    image: docker.io/grafana/grafana:12.4.9
+    depends_on:
+      - questdb
+    environment:
+      GF_SECURITY_ADMIN_USER: test
+      GF_SECURITY_ADMIN_PASSWORD: test
+      GF_INSTALL_PLUGINS: questdb-questdb-datasource
+      TZ: Europe/Paris
+    ports:
+      - "13000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dev/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dev/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
 volumes:
   questdb-data:
+  grafana-data:

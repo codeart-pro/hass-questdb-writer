@@ -1,0 +1,204 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "questdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "questdb"
+          },
+          "format": 0,
+          "queryType": "sql",
+          "rawSql": "SELECT last_updated AS time, CAST(state AS DOUBLE) AS value FROM hass_questdb_writer_events WHERE $__conditionalAll(entity_id = '$entity_id', $entity_id) AND state ~ '^-?[0-9]+([.][0-9]+)?$' AND $__timeFilter(last_updated)",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "State values",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "questdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": ["max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "questdb"
+          },
+          "format": 0,
+          "queryType": "sql",
+          "rawSql": "SELECT last_updated AS time, count() AS events FROM hass_questdb_writer_events WHERE $__timeFilter(last_updated) SAMPLE BY $__sampleByInterval",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Events per hour",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "questdb-questdb-datasource",
+        "uid": "questdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": true,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "events"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "questdb-questdb-datasource",
+            "uid": "questdb"
+          },
+          "format": 1,
+          "queryType": "sql",
+          "rawSql": "SELECT entity_id, count() AS events, min(ingested_at) AS first_seen, max(ingested_at) AS last_seen, count() FILTER (WHERE state = 'unavailable') AS unavailable FROM hass_questdb_writer_events WHERE $__timeFilter(ingested_at) GROUP BY entity_id ORDER BY events DESC LIMIT 20",
+          "refId": "A",
+          "selectedFormat": 2
+        }
+      ],
+      "title": "Entities by event volume",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": ["questdb", "home-assistant"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": {
+          "type": "questdb-questdb-datasource",
+          "uid": "questdb"
+        },
+        "definition": "SELECT DISTINCT entity_id FROM hass_questdb_writer_events",
+        "includeAll": true,
+        "label": "Entity",
+        "name": "entity_id",
+        "options": [],
+        "query": "SELECT DISTINCT entity_id FROM hass_questdb_writer_events",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "QuestDB Events",
+  "uid": "questdb-events",
+  "version": 1,
+  "weekStart": ""
+}
