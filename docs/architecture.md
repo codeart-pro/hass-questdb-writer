@@ -158,12 +158,15 @@ does not claim global ordering across multiple HA instances. Confirmed rows
 are deleted atomically. Permanently rejected rows move atomically into a
 separate dead-letter table.
 
-Pending and dead-letter stores both have explicit row and payload-byte limits.
-The limits do not pretend to include SQLite page, index, WAL, or metadata
-overhead, so the integration also needs a filesystem free-space guard before
-production release. Reaching any limit must be visible through logs and
-diagnostics and invoke an explicit policy. The project will not advertise
-unlimited outage retention.
+Pending and dead-letter stores both have explicit row and payload-byte
+limits. The limits do not pretend to include SQLite page, index, WAL, or
+metadata overhead, so the integration also needs a filesystem free-space guard
+before production release. Reaching the pending limit must be visible through
+logs and diagnostics and invoke an explicit policy. The dead-letter store is a
+bounded ring buffer: when a move would exceed its limits, the oldest rows are
+evicted first and the evictions are counted and logged, never silent. The
+project will not advertise unlimited outage retention. See
+[ADR 0006](decisions/0006-dead-letter-retention.md).
 
 The worker persists multiple ingress events in one transaction. The local
 ARM64 benchmark measured a median of about 19,900 events/s for one transaction
@@ -242,7 +245,10 @@ the integration.
 
 Deterministically invalid rows must not block the entire spool forever. After
 classification, they move to a dead-letter state with the full error available
-in diagnostics. Automatic dropping is not silent.
+in diagnostics. The dead-letter store is a bounded ring buffer that evicts its
+oldest rows when full; evictions are counted and rate-limited logged, so
+automatic dropping is not silent. Good rows behind rejected rows always keep
+flowing.
 
 ### Spool full or unwritable
 
@@ -326,7 +332,8 @@ Diagnostics expose at least:
 - connection state and last successful flush time;
 - ingress queue depth and high-water mark;
 - pending spool rows and bytes;
-- delivered, retried, rejected, overflowed, and dead-letter counts;
+- delivered, retried, rejected, overflowed, dead-letter, dead-letter-evicted,
+  and uncertain-delivery counts;
 - current retry delay and sanitized last error;
 - client, integration, HA, and server compatibility versions where available.
 

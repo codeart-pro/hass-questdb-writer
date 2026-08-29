@@ -13,6 +13,7 @@ from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 from enum import Enum
+import logging
 import math
 from queue import Empty, Full, Queue
 import random
@@ -38,6 +39,13 @@ from .transport import (
 
 _MAX_SQLITE_BATCH_BYTES = 2**63 - 1
 _MAX_ERROR_TEXT = 4_096
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _log_on_power_of_two(count: int) -> bool:
+    """Rate-limit repeated warnings without a timer task."""
+    return count > 0 and count & (count - 1) == 0
 
 
 class SpoolHandle(Protocol):
@@ -68,7 +76,7 @@ class SpoolHandle(Protocol):
         last_error: str,
         failed_ns: int,
         delivery_uncertain: bool,
-    ) -> int: ...
+    ) -> tuple[int, int]: ...
 
     def close(self) -> None: ...
 
@@ -186,6 +194,8 @@ class WorkerSnapshot:
     delivered_events: int
     retry_attempts: int
     dead_lettered_events: int
+    dead_letter_evicted_events: int
+    uncertain_delivered_events: int
     overflowed_events: int
     oversized_events: int
     pending_rows: int
@@ -201,6 +211,15 @@ class WorkerSnapshot:
 class _DeliveryOutcome:
     kind: str
     retry_delay: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _BuiltBatch:
+    """One encoded ILP batch plus the delivery metadata of its rows."""
+
+    payload: bytes
+    sequences: tuple[int, ...]
+    uncertain_sequences: tuple[int, ...]
 
 
 class _Backoff:
@@ -298,6 +317,8 @@ class WriterService:
         self._delivered_events = 0
         self._retry_attempts = 0
         self._dead_lettered_events = 0
+        self._dead_letter_evicted_events = 0
+        self._uncertain_delivered_events = 0
         self._overflowed_events = 0
         self._oversized_events = 0
         self._spool_stats = SpoolStats(0, 0, 0, 0)
@@ -405,6 +426,8 @@ class WriterService:
                 delivered_events=self._delivered_events,
                 retry_attempts=self._retry_attempts,
                 dead_lettered_events=self._dead_lettered_events,
+                dead_letter_evicted_events=self._dead_letter_evicted_events,
+                uncertain_delivered_events=self._uncertain_delivered_events,
                 overflowed_events=self._overflowed_events,
                 oversized_events=self._oversized_events,
                 pending_rows=stats.pending_rows,
@@ -608,6 +631,22 @@ class WriterService:
                 [self._wake_persist, self._stop_async], 0.05
             )
 
+    def _count_dead_letter_move(self, moved: int, evicted: int) -> None:
+        """Record a dead-letter move and rate-limit eviction warnings."""
+        with self._lock:
+            self._dead_lettered_events += moved
+            self._dead_letter_evicted_events += evicted
+            total_evicted = self._dead_letter_evicted_events
+        if evicted and _log_on_power_of_two(total_evicted):
+            _LOGGER.warning(
+                "Dead-letter store evicted %d oldest row(s) to fit %d "
+                "rejected event(s); cumulative evictions: %d. Increase the "
+                "dead-letter limits or inspect the rejected events.",
+                evicted,
+                moved,
+                total_evicted,
+            )
+
     async def _delivery_loop(
         self, spool: SpoolHandle, transport: TransportHandle
     ) -> None:
@@ -695,7 +734,7 @@ class WriterService:
         spool: SpoolHandle,
         *,
         isolate_next: bool,
-    ) -> tuple[bytes, tuple[int, ...]] | None:
+    ) -> _BuiltBatch | None:
         max_rows = 1 if isolate_next else self._settings.delivery_batch_rows
         records = spool.peek_batch(
             max_rows=max_rows,
@@ -706,6 +745,7 @@ class WriterService:
 
         payload_parts: list[bytes] = []
         sequences: list[int] = []
+        uncertain_sequences: list[int] = []
         payload_bytes = 0
         for record in records:
             try:
@@ -717,7 +757,7 @@ class WriterService:
                     break
                 error = _error_text(exc)
                 try:
-                    spool.move_to_dead_letter(
+                    moved, evicted = spool.move_to_dead_letter(
                         (record.sequence,),
                         last_error=error,
                         failed_ns=self._wall_time_ns(),
@@ -730,14 +770,13 @@ class WriterService:
                         retry_delay=None,
                     )
                     return None
-                with self._lock:
-                    self._dead_lettered_events += 1
+                self._count_dead_letter_move(moved, evicted)
                 self._set_delivery_state(
                     WorkerState.RUNNING,
                     last_error=error,
                     retry_delay=None,
                 )
-                return b"", ()
+                return _BuiltBatch(b"", (), ())
 
             if payload_bytes + len(encoded) > self._settings.delivery_batch_bytes:
                 if not payload_parts:
@@ -746,10 +785,16 @@ class WriterService:
                         f"limit is {self._settings.delivery_batch_bytes}"
                     )
                 break
+            if record.delivery_uncertain:
+                uncertain_sequences.append(record.sequence)
             payload_parts.append(encoded)
             sequences.append(record.sequence)
             payload_bytes += len(encoded)
-        return b"".join(payload_parts), tuple(sequences)
+        return _BuiltBatch(
+            b"".join(payload_parts),
+            tuple(sequences),
+            tuple(uncertain_sequences),
+        )
 
     async def _deliver_once(
         self,
@@ -761,13 +806,24 @@ class WriterService:
     ) -> _DeliveryOutcome:
         built = self._build_batch(spool, isolate_next=isolate_next)
         if built is None:
-            return _DeliveryOutcome("blocked")
-        payload, sequences = built
-        if not sequences:
+            # Defensive: the dead-letter move failed despite ring-buffer
+            # eviction. Retry with backoff instead of wedging delivery.
+            delay = backoff.next_delay()
+            error = self._last_error or "dead-letter move failed"
+            with self._lock:
+                self._retry_attempts += 1
+            self._set_delivery_state(
+                WorkerState.RETRY_WAIT,
+                last_error=error,
+                retry_delay=delay,
+            )
+            return _DeliveryOutcome("retry", retry_delay=delay)
+        if not built.sequences:
             return _DeliveryOutcome("dead_letter")
+        sequences = built.sequences
 
         try:
-            await asyncio.to_thread(transport.send_batch, payload)
+            await asyncio.to_thread(transport.send_batch, built.payload)
         except AuthenticationIlpError as exc:
             self._set_delivery_state(
                 WorkerState.BLOCKED,
@@ -808,21 +864,24 @@ class WriterService:
                 return _DeliveryOutcome("split")
             if exc.status_code == 400:
                 try:
-                    spool.move_to_dead_letter(
+                    moved, evicted = spool.move_to_dead_letter(
                         sequences,
                         last_error=error,
                         failed_ns=self._wall_time_ns(),
                         delivery_uncertain=exc.delivery_uncertain,
                     )
                 except DeadLetterFullError as dead_letter_error:
+                    # Defensive: retry later instead of wedging delivery.
+                    delay = backoff.next_delay()
+                    with self._lock:
+                        self._retry_attempts += 1
                     self._set_delivery_state(
-                        WorkerState.BLOCKED,
+                        WorkerState.RETRY_WAIT,
                         last_error=_error_text(dead_letter_error),
-                        retry_delay=None,
+                        retry_delay=delay,
                     )
-                    return _DeliveryOutcome("blocked")
-                with self._lock:
-                    self._dead_lettered_events += len(sequences)
+                    return _DeliveryOutcome("retry", retry_delay=delay)
+                self._count_dead_letter_move(moved, evicted)
                 self._set_delivery_state(
                     WorkerState.RUNNING,
                     last_error=error,
@@ -842,6 +901,9 @@ class WriterService:
         backoff.reset()
         with self._lock:
             self._delivered_events += len(sequences)
+            self._uncertain_delivered_events += len(
+                built.uncertain_sequences
+            )
             self._last_success_ns = self._wall_time_ns()
         self._set_delivery_state(
             WorkerState.RUNNING,

@@ -113,16 +113,17 @@ class WriterServiceTests(unittest.TestCase):
         values.update(overrides)
         return WorkerSettings(**values)
 
-    def open_spool(self) -> SQLiteSpool:
-        return SQLiteSpool(
-            self.path,
-            max_pending_rows=100,
-            max_pending_bytes=1_000_000,
-            max_event_bytes=10_000,
-            max_dead_letter_rows=100,
-            max_dead_letter_bytes=1_000_000,
-            busy_timeout_seconds=0.25,
-        )
+    def open_spool(self, **overrides: object) -> SQLiteSpool:
+        options: dict[str, object] = {
+            "max_pending_rows": 100,
+            "max_pending_bytes": 1_000_000,
+            "max_event_bytes": 10_000,
+            "max_dead_letter_rows": 100,
+            "max_dead_letter_bytes": 1_000_000,
+            "busy_timeout_seconds": 0.25,
+        }
+        options.update(overrides)
+        return SQLiteSpool(self.path, **options)
 
     def event(self, index: int) -> EventEnvelope:
         timestamp = 1_700_000_000_000_000_000 + index * 1_000
@@ -448,6 +449,60 @@ class WriterServiceTests(unittest.TestCase):
         self.wait_for(lambda: service.snapshot().delivered_events == 2)
         self.assertTrue(service.stop(timeout_seconds=1))
         self.assertEqual(service.snapshot().pending_rows, 0)
+
+    def test_dead_letter_ring_buffer_keeps_delivery_moving(self) -> None:
+        """Bad rows beyond dead-letter capacity must not wedge good rows."""
+        bad = b"not-json"
+        limits = dict(
+            max_dead_letter_rows=1,
+            max_dead_letter_bytes=10_000,
+            max_event_bytes=10_000,
+        )
+        with self.open_spool(**limits) as spool:
+            spool.enqueue_many(
+                (
+                    NewSpoolEvent("bad-1", bad, 1),
+                    NewSpoolEvent("bad-2", bad, 2),
+                    NewSpoolEvent("bad-3", bad, 3),
+                )
+            )
+        transport = ScriptedTransport()
+        service = self.service(
+            transport,
+            settings=self.settings(delivery_batch_rows=1),
+            spool_factory=lambda: self.open_spool(**limits),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: service.snapshot().dead_lettered_events == 3
+            and service.snapshot().delivered_events == 1
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.dead_letter_evicted_events, 2)
+        self.assertEqual(snapshot.pending_rows, 0)
+        self.assertTrue(service.stop(timeout_seconds=1))
+
+    def test_uncertain_delivery_is_counted_after_successful_retry(self) -> None:
+        """Rows delivered after an uncertain retry remain observable."""
+        retry = RetryableIlpError(
+            "response lost", retryable=True, delivery_uncertain=True
+        )
+        transport = ScriptedTransport([retry, None])
+        service = self.service(
+            transport,
+            settings=self.settings(
+                delivery_batch_rows=1,
+                retry_initial_seconds=0.01,
+            ),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().delivered_events == 1)
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.uncertain_delivered_events, 1)
+        self.assertEqual(snapshot.retry_attempts, 1)
+        self.assertTrue(service.stop(timeout_seconds=1))
 
     def test_unexpected_transport_failure_leaves_row_pending(self) -> None:
         transport = ScriptedTransport([RuntimeError("unexpected")])

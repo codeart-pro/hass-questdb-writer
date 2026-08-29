@@ -628,8 +628,14 @@ class SQLiteSpool:
         last_error: str,
         failed_ns: int,
         delivery_uncertain: bool,
-    ) -> int:
+    ) -> tuple[int, int]:
         """Atomically retain permanently failed rows and unblock the queue.
+
+        The dead-letter store is a bounded ring buffer: when a move would
+        exceed the configured row or payload-byte limits, the oldest
+        dead-letter rows are evicted first to make room. Returns the number
+        of moved and evicted rows. Eviction is not silent: callers must
+        surface the evicted count through diagnostics and logs.
 
         This operation counts the permanent failure as one delivery attempt.
         A previous uncertain-delivery flag is never cleared.
@@ -640,7 +646,7 @@ class SQLiteSpool:
         if not isinstance(delivery_uncertain, bool):
             raise ValueError("delivery_uncertain must be a boolean")
         if not sequence_values:
-            return 0
+            return 0, 0
 
         try:
             with self._transaction():
@@ -667,25 +673,39 @@ class SQLiteSpool:
                     records.append(_spool_record(row))
 
                 stats = self._stats_row()
-                added_bytes = sum(len(record.payload) for record in records)
-                if (
-                    stats["dead_letter_rows"] + len(records)
-                    > self._max_dead_letter_rows
-                ):
-                    raise DeadLetterFullError(
-                        f"dead-letter row limit "
-                        f"{self._max_dead_letter_rows} reached"
-                    )
-                if (
-                    stats["dead_letter_bytes"] + added_bytes
-                    > self._max_dead_letter_bytes
-                ):
-                    raise DeadLetterFullError(
-                        f"dead-letter payload-byte limit "
-                        f"{self._max_dead_letter_bytes} reached"
-                    )
-
+                current_rows = stats["dead_letter_rows"]
+                current_bytes = stats["dead_letter_bytes"]
+                moved = 0
+                evicted = 0
                 for record in records:
+                    payload_bytes = len(record.payload)
+                    while (
+                        current_rows + 1 > self._max_dead_letter_rows
+                        or current_bytes + payload_bytes
+                        > self._max_dead_letter_bytes
+                    ):
+                        oldest = self._db.execute(
+                            """
+                            SELECT dead_letter_id,
+                                   length(payload) AS payload_bytes
+                            FROM dead_letter
+                            ORDER BY dead_letter_id
+                            LIMIT 1
+                            """
+                        ).fetchone()
+                        if oldest is None:
+                            raise DeadLetterFullError(
+                                "dead-letter store cannot accommodate "
+                                "an event within its configured limits"
+                            )
+                        self._db.execute(
+                            "DELETE FROM dead_letter WHERE dead_letter_id = ?",
+                            (oldest["dead_letter_id"],),
+                        )
+                        current_rows -= 1
+                        current_bytes -= oldest["payload_bytes"]
+                        evicted += 1
+
                     self._db.execute(
                         """
                         INSERT INTO dead_letter (
@@ -721,11 +741,14 @@ class SQLiteSpool:
                         raise SpoolStateError(
                             f"pending sequence {record.sequence} disappeared"
                         )
+                    current_rows += 1
+                    current_bytes += payload_bytes
+                    moved += 1
         except SpoolError:
             raise
         except sqlite3.Error as exc:
             raise SpoolError("failed to move events to dead letter") from exc
-        return len(sequence_values)
+        return moved, evicted
 
     def peek_dead_letters(self, *, limit: int) -> tuple[DeadLetterRecord, ...]:
         """Read the oldest dead-letter rows for diagnostics."""

@@ -12,7 +12,6 @@ import unittest
 
 from custom_components.hass_questdb_writer.spool import (
     BatchLimitTooSmallError,
-    DeadLetterFullError,
     EventTooLargeError,
     NewSpoolEvent,
     SQLiteSpool,
@@ -184,27 +183,60 @@ class SQLiteSpoolTests(unittest.TestCase):
             self.assertEqual(spool.delete_dead_letters((1,)), 1)
             self.assertEqual(spool.stats().dead_letter_rows, 0)
 
-    def test_dead_letter_capacity_failure_leaves_pending_rows(self) -> None:
+    def test_dead_letter_evicts_oldest_rows_when_capacity_is_exceeded(self) -> None:
         with self.open_spool(
-            max_dead_letter_rows=1,
-            max_dead_letter_bytes=4,
-            max_event_bytes=4,
+            max_dead_letter_rows=2,
+            max_dead_letter_bytes=100,
+            max_event_bytes=50,
         ) as spool:
             spool.enqueue_many(
                 (
-                    NewSpoolEvent("event-1", b"12", 1),
-                    NewSpoolEvent("event-2", b"34", 2),
+                    NewSpoolEvent("event-1", b"one", 1),
+                    NewSpoolEvent("event-2", b"two", 2),
+                    NewSpoolEvent("event-3", b"three", 3),
                 )
             )
-            with self.assertRaises(DeadLetterFullError):
-                spool.move_to_dead_letter(
-                    (1, 2),
-                    last_error="invalid",
-                    failed_ns=10,
-                    delivery_uncertain=False,
+            moved, evicted = spool.move_to_dead_letter(
+                (1, 2, 3),
+                last_error="invalid",
+                failed_ns=10,
+                delivery_uncertain=False,
+            )
+            self.assertEqual((moved, evicted), (3, 1))
+            self.assertEqual(spool.stats().pending_rows, 0)
+            self.assertEqual(spool.stats().dead_letter_rows, 2)
+            dead = spool.peek_dead_letters(limit=10)
+            self.assertEqual(
+                [record.event_id for record in dead], ["event-2", "event-3"]
+            )
+            self.assertEqual(
+                spool.stats().dead_letter_bytes,
+                sum(len(record.payload) for record in dead),
+            )
+
+    def test_dead_letter_evicts_oldest_rows_by_byte_limit(self) -> None:
+        with self.open_spool(
+            max_dead_letter_rows=10,
+            max_dead_letter_bytes=6,
+            max_event_bytes=6,
+        ) as spool:
+            spool.enqueue_many(
+                (
+                    NewSpoolEvent("event-1", b"1234", 1),
+                    NewSpoolEvent("event-2", b"5678", 2),
                 )
-            self.assertEqual(spool.stats().pending_rows, 2)
-            self.assertEqual(spool.stats().dead_letter_rows, 0)
+            )
+            moved, evicted = spool.move_to_dead_letter(
+                (1, 2),
+                last_error="invalid",
+                failed_ns=10,
+                delivery_uncertain=False,
+            )
+            self.assertEqual((moved, evicted), (2, 1))
+            self.assertEqual(spool.stats().dead_letter_rows, 1)
+            self.assertEqual(spool.stats().dead_letter_bytes, 4)
+            dead = spool.peek_dead_letters(limit=10)
+            self.assertEqual([record.event_id for record in dead], ["event-2"])
 
     def test_stats_are_reconciled_from_records_on_reopen(self) -> None:
         spool = self.open_spool()
