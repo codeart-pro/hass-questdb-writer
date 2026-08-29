@@ -1,8 +1,16 @@
-"""Single-threaded durable delivery state machine."""
+"""Single-threaded durable delivery state machine.
+
+The worker owns one thread running an asyncio loop with two independent
+coroutines: a persist loop (ingress queue -> SQLite) and a delivery loop
+(spool -> transport). The blocking ILP/HTTP request runs in the loop's
+default executor, so durable persistence never waits on network I/O.
+"""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
+import contextlib
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -271,9 +279,12 @@ class WriterService:
             maxsize=settings.ingress_queue_capacity
         )
         self._lock = Lock()
-        self._wake = Event()
         self._ready = Event()
         self._stop_requested = Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stop_async = asyncio.Event()
+        self._wake_persist = asyncio.Event()
+        self._wake_deliver = asyncio.Event()
         self._thread: Thread | None = None
         self._shutdown_deadline: float | None = None
         self._failure: BaseException | None = None
@@ -314,7 +325,7 @@ class WriterService:
                 self._accepting = False
                 self._last_error = "worker initialization timed out"
             self._stop_requested.set()
-            self._wake.set()
+            self._signal_loop(self._stop_async.set)
             raise WorkerStartTimeoutError("worker initialization timed out")
 
         with self._lock:
@@ -354,7 +365,7 @@ class WriterService:
             self._ingress_high_watermark = max(
                 self._ingress_high_watermark, self._ingress.qsize()
             )
-        self._wake.set()
+        self._signal_loop(self._wake_persist.set)
         return True
 
     def stop(self, *, timeout_seconds: float) -> bool:
@@ -373,7 +384,7 @@ class WriterService:
             self._state = WorkerState.STOPPING
             self._shutdown_deadline = self._monotonic() + timeout
         self._stop_requested.set()
-        self._wake.set()
+        self._signal_loop(self._stop_async.set)
         thread.join(timeout)
         return not thread.is_alive()
 
@@ -442,7 +453,7 @@ class WriterService:
                     self._state = WorkerState.RUNNING
                     self._accepting = True
             self._ready.set()
-            self._work_loop(spool, transport)
+            asyncio.run(self._async_main(spool, transport))
         except BaseException as exc:
             failed = True
             with self._lock:
@@ -501,38 +512,121 @@ class WriterService:
         self._set_spool_stats(spool.stats())
         return True
 
-    def _work_loop(
+    def _signal_loop(self, action: Callable[[], None]) -> None:
+        """Run an event setter on the worker loop from another thread."""
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(action)
+            except RuntimeError:
+                pass
+
+    async def _wait_events(
+        self, events: list[asyncio.Event], timeout: float
+    ) -> None:
+        """Wait for any event or the timeout without busy-spinning."""
+        if timeout <= 0:
+            await asyncio.sleep(0)
+            return
+        waiters = [asyncio.ensure_future(event.wait()) for event in events]
+        try:
+            await asyncio.wait(
+                waiters,
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout,
+            )
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+    async def _async_main(
         self, spool: SpoolHandle, transport: TransportHandle
     ) -> None:
+        """Run the persist and delivery coroutines until stop is requested."""
+        self._loop = asyncio.get_running_loop()
+        if self._stop_requested.is_set():
+            self._stop_async.set()
+        persist_task = asyncio.create_task(self._persist_loop(spool))
+        deliver_task = asyncio.create_task(
+            self._delivery_loop(spool, transport)
+        )
+        stop_waiter = asyncio.create_task(self._stop_async.wait())
+        done, _ = await asyncio.wait(
+            {stop_waiter, persist_task, deliver_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop_waiter not in done:
+            # A worker task ended before stop was requested: surface its failure.
+            for task in (persist_task, deliver_task):
+                if task in done:
+                    task.result()
+            raise WorkerError("worker task exited before stop was requested")
+
+        with self._lock:
+            self._state = WorkerState.STOPPING
+            self._accepting = False
+        await persist_task
+        if self._settings.flush_on_shutdown:
+            stats = spool.stats()
+            if stats.pending_rows:
+                backoff = _Backoff(self._settings, self._random_source)
+                await self._deliver_once(
+                    spool, transport, isolate_next=False, backoff=backoff
+                )
+        deliver_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await deliver_task
+        stop_waiter.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stop_waiter
+
+    async def _persist_loop(self, spool: SpoolHandle) -> None:
+        """Persist accepted ingress while delivery proceeds independently."""
         held: list[NewSpoolEvent] = []
+        while True:
+            self._drain_ingress(held)
+            if held:
+                self._persist_held(spool, held)
+            stats = spool.stats()
+            self._set_spool_stats(stats)
+            self._wake_deliver.set()
+            stopping = self._stop_async.is_set()
+            if stopping:
+                if not held and self._ingress.empty():
+                    return
+                deadline = self._shutdown_deadline
+                if deadline is not None and self._monotonic() >= deadline:
+                    raise WorkerShutdownError(
+                        f"shutdown left {len(held) + self._ingress.qsize()} "
+                        "accepted events unpersisted"
+                    )
+                await asyncio.sleep(0)
+                continue
+            self._wake_persist.clear()
+            await self._wait_events(
+                [self._wake_persist, self._stop_async], 0.05
+            )
+
+    async def _delivery_loop(
+        self, spool: SpoolHandle, transport: TransportHandle
+    ) -> None:
+        """Deliver pending spool rows without blocking the persist path."""
         pending_since: float | None = None
         retry_at: float | None = None
         blocked = False
         isolate_next = False
-        shutdown_flush_attempted = False
         backoff = _Backoff(self._settings, self._random_source)
-
         while True:
+            if self._stop_async.is_set():
+                return
             now = self._monotonic()
-            self._drain_ingress(held)
-            persisted = self._persist_held(spool, held)
             stats = spool.stats()
             self._set_spool_stats(stats)
             if stats.pending_rows and pending_since is None:
                 pending_since = now
             if not stats.pending_rows:
                 pending_since = None
-
-            stopping = self._stop_requested.is_set()
-            queue_empty = self._ingress.empty()
-            if stopping and held:
-                deadline = self._shutdown_deadline
-                if deadline is not None and now >= deadline:
-                    raise WorkerShutdownError(
-                        f"shutdown left {len(held) + self._ingress.qsize()} "
-                        "accepted events unpersisted"
-                    )
-
             retry_ready = retry_at is None or now >= retry_at
             flush_due = (
                 stats.pending_rows >= self._settings.delivery_batch_rows
@@ -543,26 +637,20 @@ class WriterService:
                     >= self._settings.flush_interval_seconds
                 )
             )
-            pressure_due = not persisted and stats.pending_rows > 0
-            shutdown_due = (
-                stopping
-                and not held
-                and queue_empty
-                and self._settings.flush_on_shutdown
-                and not shutdown_flush_attempted
-                and stats.pending_rows > 0
+            pressure_due = (
+                stats.pending_rows > 0
+                and self._ingress.empty()
+                and self._held_unpersisted == 0
             )
             delivery_due = (
                 stats.pending_rows > 0
                 and not blocked
                 and retry_ready
-                and (flush_due or pressure_due or shutdown_due)
+                and (flush_due or pressure_due)
             )
 
             if delivery_due:
-                if shutdown_due:
-                    shutdown_flush_attempted = True
-                outcome = self._deliver_once(
+                outcome = await self._deliver_once(
                     spool,
                     transport,
                     isolate_next=isolate_next,
@@ -580,29 +668,27 @@ class WriterService:
                 isolate_next = outcome.kind == "split"
                 if outcome.kind in ("success", "dead_letter"):
                     pending_since = (
-                        self._monotonic() - self._settings.flush_interval_seconds
+                        self._monotonic()
+                        - self._settings.flush_interval_seconds
                         if stats.pending_rows
                         else None
                     )
                 continue
 
-            if stopping and not held and queue_empty:
-                return
-
             wait_until: list[float] = [
                 now + self._settings.flush_interval_seconds
             ]
             if pending_since is not None:
-                wait_until.append(
-                    pending_since + self._settings.flush_interval_seconds
-                )
-            if retry_at is not None:
+                flush_at = pending_since + self._settings.flush_interval_seconds
+                if flush_at > now:
+                    wait_until.append(flush_at)
+            if retry_at is not None and retry_at > now:
                 wait_until.append(retry_at)
-            if stopping and self._shutdown_deadline is not None:
-                wait_until.append(self._shutdown_deadline)
-            timeout = max(0.0, min(wait_until) - self._monotonic())
-            self._wake.wait(timeout)
-            self._wake.clear()
+            delay = max(0.0, min(wait_until) - self._monotonic())
+            self._wake_deliver.clear()
+            await self._wait_events(
+                [self._wake_deliver, self._stop_async], delay
+            )
 
     def _build_batch(
         self,
@@ -665,7 +751,7 @@ class WriterService:
             payload_bytes += len(encoded)
         return b"".join(payload_parts), tuple(sequences)
 
-    def _deliver_once(
+    async def _deliver_once(
         self,
         spool: SpoolHandle,
         transport: TransportHandle,
@@ -681,7 +767,7 @@ class WriterService:
             return _DeliveryOutcome("dead_letter")
 
         try:
-            transport.send_batch(payload)
+            await asyncio.to_thread(transport.send_batch, payload)
         except AuthenticationIlpError as exc:
             self._set_delivery_state(
                 WorkerState.BLOCKED,

@@ -428,6 +428,27 @@ class WriterServiceTests(unittest.TestCase):
         self.wait_for(lambda: not service.snapshot().thread_alive)
         self.assertEqual(service.snapshot().state, WorkerState.STOPPED)
 
+    def test_persists_ingress_while_delivery_request_is_in_flight(self) -> None:
+        """Durable persistence must not wait on an in-flight HTTP request."""
+        transport = BlockingTransport()
+        service = self.service(
+            transport,
+            settings=self.settings(delivery_batch_rows=1),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.assertTrue(transport.send_entered.wait(1))
+
+        # The delivery call is blocked; new ingress must still reach SQLite.
+        self.assertTrue(service.submit(self.event(2)))
+        self.wait_for(lambda: service.snapshot().persisted_events == 2)
+        self.assertEqual(service.snapshot().pending_rows, 2)
+
+        transport.send_release.set()
+        self.wait_for(lambda: service.snapshot().delivered_events == 2)
+        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertEqual(service.snapshot().pending_rows, 0)
+
     def test_unexpected_transport_failure_leaves_row_pending(self) -> None:
         transport = ScriptedTransport([RuntimeError("unexpected")])
         service = self.service(
