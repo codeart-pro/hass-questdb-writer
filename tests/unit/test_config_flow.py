@@ -388,7 +388,15 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(result["type"], "form")
-        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        self.assertEqual(
+            result["errors"]["base"], "overlapping_filters"
+        )
+        self.assertEqual(
+            result["errors"]["include_entities"], "overlapping_item"
+        )
+        self.assertEqual(
+            result["errors"]["exclude_entities"], "overlapping_item"
+        )
         self.assertIn("entities: sensor.kitchen", result["description_placeholders"]["conflicts"])
         # the entered values must survive the error re-render
         schema_values = result["data_schema"]({})
@@ -410,7 +418,13 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
-        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        self.assertEqual(result["errors"]["base"], "overlapping_filters")
+        self.assertEqual(
+            result["errors"][CONF_ATTRIBUTE_ALLOWLIST], "overlapping_item"
+        )
+        self.assertEqual(
+            result["errors"][CONF_ATTRIBUTE_DENYLIST], "overlapping_item"
+        )
         self.assertIn("attributes: rssi", result["description_placeholders"]["conflicts"])
 
     async def test_overlapping_domains_and_globs_are_rejected(self) -> None:
@@ -425,7 +439,19 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
-        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        self.assertEqual(result["errors"]["base"], "overlapping_filters")
+        self.assertEqual(
+            result["errors"]["include_domains"], "overlapping_item"
+        )
+        self.assertEqual(
+            result["errors"]["exclude_domains"], "overlapping_item"
+        )
+        self.assertEqual(
+            result["errors"]["include_entity_globs"], "overlapping_item"
+        )
+        self.assertEqual(
+            result["errors"]["exclude_entity_globs"], "overlapping_item"
+        )
         conflicts = result["description_placeholders"]["conflicts"]
         self.assertIn("domains: sensor", conflicts)
         self.assertIn("globs: sensor.garden_*", conflicts)
@@ -447,7 +473,13 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
                 }
             ),
         )
-        self.assertEqual(result["errors"], {"base": "overlapping_filters"})
+        self.assertEqual(result["errors"]["base"], "overlapping_filters")
+        self.assertEqual(
+            result["errors"]["include_entities"], "overlapping_item"
+        )
+        self.assertEqual(
+            result["errors"]["exclude_entities"], "overlapping_item"
+        )
         conflicts = result["description_placeholders"]["conflicts"]
         self.assertIn("sensor.kitchen", conflicts)
         self.assertNotIn("sensor.garden", conflicts)

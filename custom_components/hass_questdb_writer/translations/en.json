@@ -70,6 +70,7 @@
     "error": {
       "invalid_filter": "The entity filter is invalid.",
       "overlapping_filters": "These items appear in both the include and exclude lists: {conflicts}. Remove them from one of the lists (exclude wins).",
+      "overlapping_item": "This item is also in the opposite list.",
       "invalid_retry_bounds": "The maximum retry delay must not be below the initial retry delay.",
       "invalid_size_bounds": "The maximum serialized event size must not exceed the dead-letter byte capacity."
     }

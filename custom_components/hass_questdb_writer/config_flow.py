@@ -186,6 +186,24 @@ def _overlapping_pairs(include: dict, exclude: dict, allow: list, deny: list) ->
     return "; ".join(parts)
 
 
+def _conflicted_fields(include: dict, exclude: dict, allow: list, deny: list) -> list[str]:
+    """Return the form field keys that participate in an overlap."""
+    fields: list[str] = []
+    for left_key, left, right in (
+        (CONF_INCLUDE_ENTITIES, include.get(CONF_ENTITIES, []), exclude.get(CONF_ENTITIES, [])),
+        (CONF_EXCLUDE_ENTITIES, exclude.get(CONF_ENTITIES, []), include.get(CONF_ENTITIES, [])),
+        (CONF_INCLUDE_DOMAINS, include.get(CONF_DOMAINS, []), exclude.get(CONF_DOMAINS, [])),
+        (CONF_EXCLUDE_DOMAINS, exclude.get(CONF_DOMAINS, []), include.get(CONF_DOMAINS, [])),
+        (CONF_INCLUDE_ENTITY_GLOBS, include.get(CONF_ENTITY_GLOBS, []), exclude.get(CONF_ENTITY_GLOBS, [])),
+        (CONF_EXCLUDE_ENTITY_GLOBS, exclude.get(CONF_ENTITY_GLOBS, []), include.get(CONF_ENTITY_GLOBS, [])),
+        (CONF_ATTRIBUTE_ALLOWLIST, allow, deny),
+        (CONF_ATTRIBUTE_DENYLIST, deny, allow),
+    ):
+        if set(left) & set(right):
+            fields.append(left_key)
+    return fields
+
+
 def _init_schema(
     options: dict[str, Any], domain_options: list[dict[str, str]]
 ) -> vol.Schema:
@@ -476,13 +494,22 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 include, exclude, attribute_allow, attribute_deny
             )
             if overlaps:
+                field_errors = {
+                    field: "overlapping_item"
+                    for field in _conflicted_fields(
+                        include, exclude, attribute_allow, attribute_deny
+                    )
+                }
                 return self.async_show_form(
                     step_id="init",
                     data_schema=_init_schema(
                         display_options,
                         await _domain_selector_options(self.hass),
                     ),
-                    errors={"base": "overlapping_filters"},
+                    errors={
+                        "base": "overlapping_filters",
+                        **field_errors,
+                    },
                     description_placeholders={"conflicts": overlaps},
                 )
             try:
