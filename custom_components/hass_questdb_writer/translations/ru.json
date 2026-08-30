@@ -63,7 +63,8 @@
           "sqlite_busy_timeout_seconds": "Таймаут занятости SQLite (секунд)",
           "http_timeout_seconds": "HTTP-таймаут (секунд)",
           "start_timeout_seconds": "Таймаут запуска (секунд)",
-          "stop_timeout_seconds": "Таймаут остановки (секунд)"
+          "stop_timeout_seconds": "Таймаут остановки (секунд)",
+          "retention_days": "Хранение данных (дней, 0 = без ограничения)"
         }
       }
     },

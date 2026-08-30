@@ -131,6 +131,7 @@ class SchemaManagerTests(unittest.TestCase):
         transport.responses = [
             {"ddl": "OK"},
             {"dataset": self.columns(), "count": len(EXPECTED_COLUMNS)},
+            self.tables_ttl(None),
         ]
         manager = self.manager(transport)
         manager.ensure("ha_events")
@@ -179,6 +180,65 @@ class SchemaManagerTests(unittest.TestCase):
         manager = self.manager(transport)
         manager.close()
         self.assertTrue(transport.closed)
+
+    def manager_with_retention(
+        self, transport: FakeExecTransport, retention_days: int
+    ) -> IlpSchemaManager:
+        return IlpSchemaManager(
+            "localhost",
+            9000,
+            use_tls=False,
+            timeout_seconds=1,
+            retention_days=retention_days,
+            transport=transport,  # type: ignore[arg-type]
+        )
+
+    def tables_ttl(self, ttl_days: int | None) -> dict:
+        value = ttl_days or 0
+        unit = "DAY" if ttl_days else "null"
+        return {"dataset": [["ha_events", value, unit]]}
+
+    def test_retention_applies_ttl_when_unset(self) -> None:
+        transport = FakeExecTransport()
+        transport.responses = [
+            {"dataset": self.columns()},
+            {"dataset": self.columns()},
+            self.tables_ttl(None),
+            {"ddl": "OK"},
+        ]
+        self.manager_with_retention(transport, 30).ensure("ha_events")
+        self.assertEqual(transport.queries[-1], 'ALTER TABLE "ha_events" SET TTL 30 DAYS')
+
+    def test_retention_noop_when_ttl_matches(self) -> None:
+        transport = FakeExecTransport()
+        transport.responses = [
+            {"dataset": self.columns()},
+            {"dataset": self.columns()},
+            self.tables_ttl(30),
+        ]
+        self.manager_with_retention(transport, 30).ensure("ha_events")
+        self.assertNotIn("SET TTL", " ".join(transport.queries))
+
+    def test_retention_zero_clears_existing_ttl(self) -> None:
+        transport = FakeExecTransport()
+        transport.responses = [
+            {"dataset": self.columns()},
+            {"dataset": self.columns()},
+            self.tables_ttl(30),
+            {"ddl": "OK"},
+        ]
+        self.manager_with_retention(transport, 0).ensure("ha_events")
+        self.assertEqual(transport.queries[-1], 'ALTER TABLE "ha_events" SET TTL 0 DAYS')
+
+    def test_retention_zero_noop_when_no_ttl(self) -> None:
+        transport = FakeExecTransport()
+        transport.responses = [
+            {"dataset": self.columns()},
+            {"dataset": self.columns()},
+            self.tables_ttl(None),
+        ]
+        self.manager_with_retention(transport, 0).ensure("ha_events")
+        self.assertNotIn("SET TTL", " ".join(transport.queries))
 
 
 if __name__ == "__main__":

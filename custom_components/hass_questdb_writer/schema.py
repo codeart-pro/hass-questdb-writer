@@ -144,6 +144,7 @@ class IlpSchemaManager:
         timeout_seconds: float,
         username: str | None = None,
         password: str | None = None,
+        retention_days: int = 0,
         transport: IlpHttpTransport | None = None,
     ) -> None:
         self._transport = transport or IlpHttpTransport(
@@ -154,6 +155,7 @@ class IlpSchemaManager:
             username=username,
             password=password,
         )
+        self._retention_days = retention_days
 
     def ensure(self, table: str) -> None:
         """Create the table if missing, then validate it strictly.
@@ -181,6 +183,39 @@ class IlpSchemaManager:
         if not isinstance(document, dict):
             raise SchemaError(f"unexpected exec response for {table}")
         validate_table_columns(document.get("dataset"), table)
+        self._apply_retention(table)
+
+    def _read_ttl_days(self, table: str) -> int | None:
+        """Return the table's configured TTL in days, or None when unset.
+
+        Read from `tables()` (ttlValue/ttlUnit): `SHOW CREATE TABLE` does
+        not render the TTL clause for WAL DEDUP tables even though the TTL
+        is active.
+        """
+        document = self._transport.exec_query(
+            "SELECT table_name, ttlValue, ttlUnit FROM tables() "
+            f"WHERE table_name = '{table.replace(chr(39), chr(39) * 2)}'"
+        )
+        if not isinstance(document, dict):
+            raise SchemaError(f"unexpected tables() response for {table}")
+        rows = document.get("dataset")
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], list):
+            raise SchemaError(f"malformed tables() response for {table}")
+        value = rows[0][1] if len(rows[0]) > 1 else None
+        if not isinstance(value, (int, float)):
+            raise SchemaError(f"malformed tables() response for {table}")
+        ttl = int(value)
+        return ttl if ttl > 0 else None
+
+    def _apply_retention(self, table: str) -> None:
+        """Align the table TTL with the configured retention (0 = unlimited)."""
+        current = self._read_ttl_days(table)
+        desired = self._retention_days
+        if current == (desired or None):
+            return
+        self._transport.exec_query(
+            f"ALTER TABLE {quote_identifier(table)} SET TTL {desired} DAYS"
+        )
 
     def close(self) -> None:
         """Close the owned connection; safe to call repeatedly."""

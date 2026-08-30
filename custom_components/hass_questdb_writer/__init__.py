@@ -38,6 +38,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_PERSIST_BATCH_ROWS,
     CONF_PORT,
+    CONF_RETENTION_DAYS,
     CONF_RETRY_INITIAL_SECONDS,
     CONF_RETRY_JITTER_RATIO,
     CONF_RETRY_MAX_SECONDS,
@@ -187,6 +188,7 @@ def _runtime_configuration(
         tracked_entity_ids=None,
         entity_filter=_entity_filter(options),
         attribute_filter=_attribute_filter(options),
+        retention_days=int(options.get(CONF_RETENTION_DAYS, 0) or 0),
     )
 
 

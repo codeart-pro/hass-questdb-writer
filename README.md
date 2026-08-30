@@ -63,7 +63,8 @@ action; filtering and tuning options live in **Configure**.
   write everything
 - **Advanced** — queue/spool/dead-letter capacities, batch sizes, retry
   and timeout tuning (all have provisional defaults, see the architecture
-  doc)
+  doc); **data retention (days)** — QuestDB drops day partitions older
+  than the window automatically (TTL), `0` keeps everything
 
 ## Data model
 

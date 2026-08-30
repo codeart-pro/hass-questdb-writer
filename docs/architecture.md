@@ -320,7 +320,9 @@ owns:
 
 - QuestDB URL, TLS, and HTTP Basic authentication material
   (`username`/`password`, optional and stored in the config entry);
-- the target table.
+- the target table;
+- the data retention in days (TTL; 0 = keep everything), applied by the
+  schema manager on every `ensure` (ADR-0009).
 
 The connection parameters can be changed at any time through the
 **Reconfigure** flow (reuses the user step; empty credential fields keep

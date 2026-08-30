@@ -74,6 +74,7 @@ class RuntimeConfiguration:
     tracked_entity_ids: tuple[str, ...] | None
     entity_filter: EntityFilter | None = None
     attribute_filter: AttributeFilter | None = None
+    retention_days: int = 0
 
     def __post_init__(self) -> None:
         if not self.table:
@@ -196,6 +197,7 @@ class HassQuestDbRuntime:
                 timeout_seconds=configuration.connection.timeout_seconds,
                 username=configuration.connection.username,
                 password=configuration.connection.password,
+                retention_days=configuration.retention_days,
             )
 
         return WriterService(

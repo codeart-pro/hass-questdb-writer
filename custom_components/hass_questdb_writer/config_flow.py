@@ -47,6 +47,7 @@ from .const import (
     CONF_PASSWORD,
     CONF_PERSIST_BATCH_ROWS,
     CONF_PORT,
+    CONF_RETENTION_DAYS,
     CONF_RETRY_INITIAL_SECONDS,
     CONF_RETRY_JITTER_RATIO,
     CONF_RETRY_MAX_SECONDS,
@@ -328,6 +329,26 @@ def _advanced_schema(options: dict[str, Any]) -> vol.Schema:
                 CONF_MAX_DEAD_LETTER_BYTES,
                 default=get(CONF_MAX_DEAD_LETTER_BYTES, PROVISIONAL_MAX_DEAD_LETTER_BYTES),
             ): _number(65_536, 268_435_456, 65_536),
+            vol.Optional(
+                CONF_RETENTION_DAYS,
+                default=str(get(CONF_RETENTION_DAYS, 0)),
+            ): vol.All(
+                selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            {"label": "No limit", "value": "0"},
+                            {"label": "7 days", "value": "7"},
+                            {"label": "30 days", "value": "30"},
+                            {"label": "90 days", "value": "90"},
+                            {"label": "180 days", "value": "180"},
+                            {"label": "365 days", "value": "365"},
+                        ],
+                        custom_value=True,
+                    )
+                ),
+                vol.Coerce(int),
+                vol.Range(min=0, max=3650),
+            ),
             vol.Optional(
                 CONF_SQLITE_BUSY_TIMEOUT_SECONDS,
                 default=get(CONF_SQLITE_BUSY_TIMEOUT_SECONDS, PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS),

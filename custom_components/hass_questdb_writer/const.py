@@ -10,6 +10,7 @@ CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 
 CONF_SHOW_ADVANCED = "show_advanced"
+CONF_RETENTION_DAYS = "retention_days"
 CONF_INCLUDE = "include"
 CONF_EXCLUDE = "exclude"
 CONF_ATTRIBUTE_ALLOWLIST = "attribute_allowlist"

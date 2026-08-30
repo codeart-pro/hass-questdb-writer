@@ -27,6 +27,7 @@ from custom_components.hass_questdb_writer.const import (
     CONF_MAX_SERIALIZED_EVENT_BYTES,
     CONF_PASSWORD,
     CONF_PORT,
+    CONF_RETENTION_DAYS,
     CONF_RETRY_INITIAL_SECONDS,
     CONF_RETRY_MAX_SECONDS,
     CONF_SHOW_ADVANCED,
@@ -483,6 +484,17 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         conflicts = result["description_placeholders"]["conflicts"]
         self.assertIn("sensor.kitchen", conflicts)
         self.assertNotIn("sensor.garden", conflicts)
+
+    async def test_advanced_persists_retention(self) -> None:
+        flow = self.flow()
+        await self._init(flow, self.filter_input({CONF_SHOW_ADVANCED: True}))
+        form = await flow.async_step_advanced(None)
+        self.assertIn(CONF_RETENTION_DAYS, form["data_schema"].schema)
+        result = await flow.async_step_advanced(
+            {CONF_RETENTION_DAYS: 30, CONF_FLUSH_ON_SHUTDOWN: False}
+        )
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(result["data"][CONF_RETENTION_DAYS], 30)
 
     async def test_advanced_rejects_retry_bounds_inversion(self) -> None:
         flow = self.flow()

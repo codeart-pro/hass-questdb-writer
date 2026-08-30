@@ -30,7 +30,10 @@ from custom_components.hass_questdb_writer.runtime import (
     RuntimeConfiguration,
     SpoolConfiguration,
 )
-from custom_components.hass_questdb_writer.schema import validate_table_columns
+from custom_components.hass_questdb_writer.schema import (
+    IlpSchemaManager,
+    validate_table_columns,
+)
 from custom_components.hass_questdb_writer.worker import WorkerSettings, WorkerState
 
 
@@ -303,6 +306,51 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         snapshot = entry.runtime_data.snapshot()
         self.assertEqual(snapshot.state_events_excluded, 1)
+
+    def test_retention_ttl_applied_and_removed(self) -> None:
+        table = "hass_qdb_writer_ttl_integration"
+        self.sql(f"DROP TABLE IF EXISTS {table}")
+        manager = IlpSchemaManager(
+            self.host,
+            self.port,
+            use_tls=False,
+            timeout_seconds=5,
+            retention_days=30,
+        )
+        manager.ensure(table)
+        # ALTER SET TTL applies asynchronously on WAL tables: poll tables()
+        # until the new value is visible.
+        deadline = time.monotonic() + 5
+        ttl = 0
+        while time.monotonic() < deadline:
+            ttl = self.sql(
+                "SELECT ttlValue FROM tables() "
+                f"WHERE table_name = '{table}'"
+            )["dataset"][0][0]
+            if ttl == 30:
+                break
+            time.sleep(0.1)
+        self.assertEqual(ttl, 30)
+        manager = IlpSchemaManager(
+            self.host,
+            self.port,
+            use_tls=False,
+            timeout_seconds=5,
+            retention_days=0,
+        )
+        manager.ensure(table)
+        deadline = time.monotonic() + 5
+        ttl = 30
+        while time.monotonic() < deadline:
+            ttl = self.sql(
+                "SELECT ttlValue FROM tables() "
+                f"WHERE table_name = '{table}'"
+            )["dataset"][0][0]
+            if ttl == 0:
+                break
+            time.sleep(0.1)
+        self.assertEqual(ttl, 0)
+        self.sql(f"DROP TABLE IF EXISTS {table}")
 
 
 if __name__ == "__main__":
