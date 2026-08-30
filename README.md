@@ -68,6 +68,12 @@ action; filtering and tuning options live in **Configure**.
 
 ## Data model
 
+Table `hass_questdb_writer_events` (owned by the integration, see
+`docs/architecture.md`): `TIMESTAMP(last_updated) PARTITION BY DAY WAL
+DEDUP UPSERT KEYS(last_updated, entity_id)`.
+
+Troubleshooting: see [docs/troubleshooting.md](docs/troubleshooting.md).
+
 | Column | Type | Notes |
 |---|---|---|
 | `last_updated` | TIMESTAMP | **designated** timestamp, **dedup key** |

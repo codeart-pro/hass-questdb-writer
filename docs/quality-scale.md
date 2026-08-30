@@ -15,18 +15,19 @@ must be complete before publication (Bronze → Silver → Gold).
 
 ## Silver
 
-- [ ] **Auth-failure visibility**: on `AuthenticationIlpError` the worker
-      goes `BLOCKED`; the user must be told to fix the credentials
-      (repair issue / system notification) and delivery must resume
-      automatically after the options are corrected (reload already does
-      this; the visible signal is missing).
+- [x] **Auth-failure visibility**: on `AuthenticationIlpError` the worker
+      goes `BLOCKED` (snapshot `block_reason="auth"`) and the runtime
+      raises a persistent ERROR repair issue («QuestDB rejected the
+      credentials») that disappears once the worker recovers or the entry
+      unloads; delivery resumes automatically after the options are
+      corrected (reload).
 - [ ] **Code owners**: non-empty `codeowners` in `manifest.json`
       (add the maintainer's GitHub handle at publication time).
 - [ ] **Recovery without log spam**: backoff + rate-limited warnings are
       implemented; verify against a long QuestDB outage in the dev stack.
-- [ ] **Troubleshooting documentation**: dedicated section in the README
+- [x] **Troubleshooting documentation**: `docs/troubleshooting.md`
       (symptoms → causes → fixes: auth, unreachable host, schema mismatch,
-      spool/dead-letter limits).
+      spool/dead-letter limits, TTL), linked from the README.
 
 ## Gold
 
