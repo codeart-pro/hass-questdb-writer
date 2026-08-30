@@ -53,18 +53,71 @@ Copy `custom_components/hass_questdb_writer/` into your Home Assistant
 The connection parameters can be changed later via the **Reconfigure**
 action; filtering and tuning options live in **Configure**.
 
-## Options (Configure)
+## Options
 
-- **Include / exclude** — entities, domains, globs (include-only acts as a
-  strict allowlist; excludes cut, everything else is written)
-- **Attribute allow / deny list** — comma-separated attribute-name patterns
-  with `*`/`?` wildcards; an allow list restricts which attributes are
-  written, a deny list removes matching ones (deny always wins). Empty =
-  write everything
-- **Advanced** — queue/spool/dead-letter capacities, batch sizes, retry
-  and timeout tuning (all have provisional defaults, see the architecture
-  doc); **data retention (days)** — QuestDB drops day partitions older
-  than the window automatically (TTL), `0` keeps everything
+Everything is configured in the UI — no YAML. There are three surfaces:
+**Reconfigure** (connection), **Configure → Entity filter** (what gets
+written) and **Configure → Show advanced settings → Advanced** (tuning and
+retention).
+
+### Connection (Setup / Reconfigure)
+
+| Option | Default | Notes |
+|---|---|---|
+| **Host** | — | QuestDB host as seen from the HA container (e.g. `questdb`) |
+| **Port** | `9000` | QuestDB REST/ILP port, 1–65535 |
+| **Table** | `hass_questdb_writer_events` | UTF-8, ≤ 127 bytes; the integration owns the table |
+| **Use HTTPS** | off | TLS for the REST/ILP connection |
+| **Username / password** | empty | HTTP Basic auth; both or neither. Reconfigure keeps the stored password when left empty |
+
+The **Submit** button verifies the connection first: an unreachable host
+or rejected credentials keep the form open with an error.
+
+### Entity filter (Configure)
+
+Empty lists mean *no restriction*. An include list acts as a **strict
+allowlist**; excludes cut into whatever remains; **exclude wins**.
+Items present in both sides of a pair are rejected at submit with an
+error naming them. `*` and `?` wildcards are supported in glob and
+attribute patterns.
+
+| Option | Control | Notes |
+|---|---|---|
+| **Entities to include** | entity picker | only these entities are written (strict allowlist) |
+| **Entities to exclude** | entity picker | these entities are never written |
+| **Domains to include / exclude** | multi-select dropdown | domains with usable entities, from the entity registry |
+| **Glob patterns to include / exclude** | text (comma-separated) | e.g. `sensor.garden_*, light.*` |
+| **Attribute patterns to include** | text (comma-separated) | only matching attributes are written, e.g. `friendly_name, unit_*, rssi` |
+| **Attribute patterns to exclude** | text (comma-separated) | matching attributes are removed (deny wins), e.g. `rssi, update.*` |
+| **Show advanced settings** | checkbox | reveals the next step (see below) |
+
+### Advanced (Configure → Show advanced settings)
+
+Values are **provisional development defaults** until production-rate
+benchmarks settle them; they can be left untouched.
+
+| Option | Default | Range | Notes |
+|---|---|---|---|
+| **Data retention (days)** | `0` (no limit) | 0–3650 | QuestDB TTL: day partitions older than the window are dropped automatically (`ALTER TABLE … SET TTL n DAYS`); `0` disables |
+| **Ingress queue capacity** | `1000` | 10–100000 | in-memory event queue between the HA listener and the SQLite spool |
+| **Max serialized event bytes** | `65536` (64 KiB) | 1024–1048576 | largest event written; larger events are skipped (counted, never crash) |
+| **Persist batch rows** | `100` | 1–10000 | rows per SQLite insert |
+| **Delivery batch rows** | `1000` | 1–100000 | events per ILP batch |
+| **Delivery batch bytes** | `524288` (512 KiB) | 4096–16777216 | bytes per ILP batch (whichever limit hits first) |
+| **Flush interval (s)** | `1.0` | 0.05–300 | spool → delivery cadence at low event rates |
+| **Retry initial (s)** | `1.0` | 0.1–300 | first backoff delay after a failed delivery |
+| **Retry max (s)** | `60` | 1–3600 | backoff ceiling |
+| **Retry multiplier** | `2.0` | 1–10 | exponential backoff factor |
+| **Retry jitter ratio** | `0.2` | 0–1 | random jitter added to each delay (0–20%) |
+| **Flush on shutdown** | off | on/off | try to deliver remaining events when HA stops; when off they stay in the spool and are delivered on next start (at-least-once) |
+| **Max pending rows** | `100000` | 100–10000000 | SQLite spool capacity (rows) |
+| **Max pending bytes** | `67108864` (64 MiB) | 1 MiB–1 GiB | SQLite spool capacity (bytes) |
+| **Max dead-letter rows** | `1000` | 10–1000000 | ring buffer of undeliverable events (FIFO eviction) |
+| **Max dead-letter bytes** | `16777216` (16 MiB) | 64 KiB–256 MiB | dead-letter capacity (bytes) |
+| **SQLite busy timeout (s)** | `1.0` | 0.05–30 | retry window for spool lock contention |
+| **HTTP timeout (s)** | `10` | 1–120 | per-request timeout for REST/schema and ILP POST |
+| **Start timeout (s)** | `10` | 1–120 | how long setup waits for the worker thread |
+| **Stop timeout (s)** | `15` | 1–300 | how long unload waits for the worker to drain |
 
 ## Data model
 
