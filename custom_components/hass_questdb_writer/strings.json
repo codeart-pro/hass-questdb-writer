@@ -75,5 +75,11 @@
       "invalid_retry_bounds": "The maximum retry delay must not be below the initial retry delay.",
       "invalid_size_bounds": "The maximum serialized event size must not exceed the dead-letter byte capacity."
     }
+  },
+  "issues": {
+    "auth_failed": {
+      "title": "QuestDB rejected the credentials",
+      "description": "QuestDB at {host} rejected the configured username/password. Open the integration and use Reconfigure to update the credentials; the writer stays paused until then."
+    }
   }
 }

@@ -205,7 +205,11 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: HassQuestDbConfigEntry
 ) -> bool:
     """Set up HASS QuestDB Writer from a config entry."""
-    runtime = HassQuestDbRuntime(hass, _runtime_configuration(hass, entry))
+    runtime = HassQuestDbRuntime(
+        hass,
+        _runtime_configuration(hass, entry),
+        entry_id=entry.entry_id,
+    )
     await runtime.async_start()
     entry.runtime_data = runtime
     entry.async_on_unload(entry.add_update_listener(async_update_options))

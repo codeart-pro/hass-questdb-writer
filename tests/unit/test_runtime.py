@@ -10,6 +10,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNKNOWN
 from homeassistant.core import Context, Event, State
@@ -83,7 +84,14 @@ class FakeService:
         return self.submit_result
 
     def snapshot(self) -> WorkerSnapshot:
-        return worker_snapshot(last_error="rejected")
+        base = worker_snapshot(last_error="rejected")
+        if getattr(self, "blocked_auth", False):
+            return replace(
+                base,
+                state=WorkerState.BLOCKED,
+                block_reason="auth",
+            )
+        return base
 
 
 class FakeBus:
@@ -116,6 +124,12 @@ class FakeHass:
 
     def async_add_executor_job(self, target: Any, *args: Any) -> Any:
         return asyncio.get_running_loop().run_in_executor(None, target, *args)
+
+    def async_create_task(self, coro: Any) -> Any:
+        return asyncio.get_running_loop().create_task(coro)
+
+    def async_create_background_task(self, coro: Any, name: str) -> Any:
+        return asyncio.get_running_loop().create_task(coro)
 
 
 class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -514,6 +528,55 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"friendly_name": "Denied"},
         )
         await runtime.async_stop()
+
+    async def test_auth_block_creates_repair_issue(self) -> None:
+        create = Mock()
+        delete = Mock()
+        with (
+            patch(
+                "homeassistant.helpers.issue_registry.async_create_issue", create
+            ),
+            patch(
+                "homeassistant.helpers.issue_registry.async_delete_issue", delete
+            ),
+        ):
+            self.service.blocked_auth = True
+            runtime = HassQuestDbRuntime(
+                self.hass,
+                self.configuration(),
+                service_factory=lambda: self.service,
+                entry_id="entry-1",
+                monitor_interval_seconds=0.01,
+            )
+            await runtime.async_start()
+            create.assert_called_once()
+            self.assertEqual(create.call_args.args[2], "auth_failed_entry-1")
+            self.assertEqual(create.call_args.kwargs["is_persistent"], True)
+            self.assertEqual(create.call_args.kwargs["is_fixable"], False)
+            self.assertEqual(
+                create.call_args.kwargs["translation_key"], "auth_failed"
+            )
+            # once the worker leaves the auth-blocked state, the issue is gone
+            self.service.blocked_auth = False
+            await asyncio.sleep(0.05)
+            delete.assert_called()
+            await runtime.async_stop()
+
+    async def test_auth_issue_is_removed_on_stop(self) -> None:
+        delete = Mock()
+        with patch(
+            "homeassistant.helpers.issue_registry.async_delete_issue", delete
+        ):
+            runtime = HassQuestDbRuntime(
+                self.hass,
+                self.configuration(),
+                service_factory=lambda: self.service,
+                entry_id="entry-1",
+            )
+            await runtime.async_start()
+            await runtime.async_stop()
+            delete.assert_called()
+            self.assertEqual(delete.call_args.args[2], "auth_failed_entry-1")
 
 
 if __name__ == "__main__":

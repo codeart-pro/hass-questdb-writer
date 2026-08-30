@@ -214,6 +214,7 @@ class WorkerSnapshot:
     retry_delay_seconds: float | None
     last_error: str | None
     last_success_ns: int | None
+    block_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +337,7 @@ class WriterService:
         self._retry_delay_seconds: float | None = None
         self._last_error: str | None = None
         self._last_success_ns: int | None = None
+        self._block_reason: str | None = None
 
     def start(self, *, timeout_seconds: float) -> None:
         """Start the one-shot worker and wait for owned resources to open."""
@@ -448,6 +450,7 @@ class WriterService:
                 retry_delay_seconds=self._retry_delay_seconds,
                 last_error=self._last_error,
                 last_success_ns=self._last_success_ns,
+                block_reason=self._block_reason,
             )
 
     def _set_spool_stats(self, stats: SpoolStats) -> None:
@@ -464,12 +467,16 @@ class WriterService:
         *,
         last_error: str | None,
         retry_delay: float | None,
+        block_reason: str | None = None,
     ) -> None:
         with self._lock:
             if self._state not in (WorkerState.STOPPING, WorkerState.FAILED):
                 self._state = state
             self._last_error = last_error
             self._retry_delay_seconds = retry_delay
+            self._block_reason = (
+                block_reason if state == WorkerState.BLOCKED else None
+            )
 
     def _run(self) -> None:
         spool: SpoolHandle | None = None
@@ -925,6 +932,7 @@ class WriterService:
                 WorkerState.BLOCKED,
                 last_error=_error_text(exc),
                 retry_delay=None,
+                block_reason="auth",
             )
             return _DeliveryOutcome("blocked")
         except RetryableIlpError as exc:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 import datetime as dt
@@ -21,16 +22,18 @@ from homeassistant.core import (
     HomeAssistant,
     callback,
 )
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entityfilter import EntityFilter
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.json import json_dumps
 
 from .attribute_filter import AttributeFilter
+from .const import DOMAIN
 from .event import EventEnvelope, EventEnvelopeError
 from .schema import IlpSchemaManager
 from .spool import SQLiteSpool
 from .transport import IlpHttpTransport
-from .worker import WorkerSettings, WorkerSnapshot, WriterService
+from .worker import WorkerSettings, WorkerSnapshot, WorkerState, WriterService
 
 _LOGGER = logging.getLogger(__name__)
 _EPOCH: Final = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
@@ -141,6 +144,8 @@ class HassQuestDbRuntime:
         service_factory: Callable[[], WriterService] | None = None,
         event_id_factory: Callable[[], str] | None = None,
         wall_time_ns: Callable[[], int] = time.time_ns,
+        entry_id: str | None = None,
+        monitor_interval_seconds: float = 30.0,
     ) -> None:
         self._hass = hass
         self._configuration = configuration
@@ -150,6 +155,9 @@ class HassQuestDbRuntime:
             service_factory() if service_factory is not None else self._make_service()
         )
         self._unsubscribe: CALLBACK_TYPE | None = None
+        self._monitor_task: asyncio.Task[None] | None = None
+        self._entry_id = entry_id
+        self._monitor_interval_seconds = monitor_interval_seconds
         self._events_seen = 0
         self._events_accepted = 0
         self._events_without_new_state = 0
@@ -226,6 +234,11 @@ class HassQuestDbRuntime:
                 self._unsubscribe = async_track_state_change_event(
                     self._hass, entity_ids, self._async_state_changed
                 )
+            if self._entry_id is not None:
+                self._sync_auth_issue()
+                self._monitor_task = self._hass.async_create_background_task(
+                    self._monitor_loop(), "hass_questdb_writer_auth_monitor"
+                )
         except BaseException:
             try:
                 stopped = await self._hass.async_add_executor_job(
@@ -246,8 +259,52 @@ class HassQuestDbRuntime:
                 )
             raise
 
+    def _issue_id(self) -> str:
+        return f"auth_failed_{self._entry_id}"
+
+    def _sync_auth_issue(self) -> None:
+        """Create or remove the credentials repair issue for this entry."""
+        if self._entry_id is None:
+            return
+        snapshot = self._service.snapshot()
+        if (
+            snapshot.state == WorkerState.BLOCKED
+            and snapshot.block_reason == "auth"
+        ):
+            ir.async_create_issue(
+                self._hass,
+                DOMAIN,
+                self._issue_id(),
+                is_fixable=False,
+                is_persistent=True,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="auth_failed",
+                translation_placeholders={
+                    "host": str(self._configuration.connection.host)
+                },
+            )
+        else:
+            ir.async_delete_issue(self._hass, DOMAIN, self._issue_id())
+
+    async def _monitor_loop(self) -> None:
+        """Periodically reflect the worker auth state in the issue registry."""
+        while True:
+            await asyncio.sleep(self._monitor_interval_seconds)
+            try:
+                self._sync_auth_issue()
+            except Exception:
+                _LOGGER.exception("Auth issue sync failed")
+
     async def async_stop(self) -> bool:
         """Unsubscribe first, then stop and join the worker."""
+        monitor_task = self._monitor_task
+        if monitor_task is not None:
+            monitor_task.cancel()
+            self._monitor_task = None
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
         unsubscribe = self._unsubscribe
         unsubscribed = True
         if unsubscribe is not None:
@@ -264,6 +321,8 @@ class HassQuestDbRuntime:
                 timeout_seconds=self._configuration.stop_timeout_seconds,
             )
         )
+        if self._entry_id is not None:
+            ir.async_delete_issue(self._hass, DOMAIN, self._issue_id())
         return unsubscribed and stopped
 
     @callback
