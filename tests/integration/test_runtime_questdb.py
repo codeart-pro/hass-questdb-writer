@@ -19,9 +19,11 @@ from homeassistant.core import HomeAssistant
 
 from custom_components.hass_questdb_writer.const import (
     CONF_HOST,
+    CONF_PASSWORD,
     CONF_PORT,
     CONF_TABLE,
     CONF_USE_TLS,
+    CONF_USERNAME,
     DOMAIN,
 )
 from custom_components.hass_questdb_writer.runtime import (
@@ -29,6 +31,9 @@ from custom_components.hass_questdb_writer.runtime import (
     HassQuestDbRuntime,
     RuntimeConfiguration,
     SpoolConfiguration,
+)
+from custom_components.hass_questdb_writer.diagnostics import (
+    async_get_config_entry_diagnostics,
 )
 from custom_components.hass_questdb_writer.schema import (
     IlpSchemaManager,
@@ -351,6 +356,48 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
             time.sleep(0.1)
         self.assertEqual(ttl, 0)
         self.sql(f"DROP TABLE IF EXISTS {table}")
+
+    async def test_diagnostics_payload_is_safe_and_complete(self) -> None:
+        form = await self.hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await self.hass.config_entries.flow.async_configure(
+            form["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: self.table,
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "top-secret",
+            },
+        )
+        self.assertEqual(result["type"], "create_entry")
+        entry = result["result"]
+        self.addAsyncCleanup(self._unload_entry, entry)
+        await self.hass.async_block_till_done()
+
+        diagnostics = await async_get_config_entry_diagnostics(
+            self.hass, entry
+        )
+        self.assertEqual(
+            diagnostics["entry_data"]["password"], "**REDACTED**"
+        )
+        self.assertEqual(diagnostics["entry_data"]["host"], self.host)
+        self.assertEqual(
+            diagnostics["schema"]["table"], self.table
+        )
+        self.assertIn(
+            "QuestDB", diagnostics["schema"]["questdb_version"]
+        )
+        worker = diagnostics["runtime"]["worker"]
+        self.assertIn(
+            worker["state"],
+            {"new", "starting", "running", "retry_wait", "blocked"},
+        )
+        self.assertIsInstance(
+            diagnostics["runtime"]["worker"]["last_errors"], tuple
+        )
 
 
 if __name__ == "__main__":

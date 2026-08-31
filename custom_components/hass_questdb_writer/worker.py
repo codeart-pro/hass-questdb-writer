@@ -9,6 +9,7 @@ default executor, so durable persistence never waits on network I/O.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
@@ -189,6 +190,14 @@ class WorkerSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerErrorRecord:
+    """One recent delivery/schema error, for diagnostics."""
+
+    ts_ns: int
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerSnapshot:
     """Thread-safe immutable diagnostics snapshot."""
 
@@ -215,6 +224,7 @@ class WorkerSnapshot:
     last_error: str | None
     last_success_ns: int | None
     block_reason: str | None = None
+    last_errors: tuple[WorkerErrorRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +348,7 @@ class WriterService:
         self._last_error: str | None = None
         self._last_success_ns: int | None = None
         self._block_reason: str | None = None
+        self._last_errors: deque[WorkerErrorRecord] = deque(maxlen=10)
 
     def start(self, *, timeout_seconds: float) -> None:
         """Start the one-shot worker and wait for owned resources to open."""
@@ -451,6 +462,7 @@ class WriterService:
                 last_error=self._last_error,
                 last_success_ns=self._last_success_ns,
                 block_reason=self._block_reason,
+                last_errors=tuple(self._last_errors),
             )
 
     def _set_spool_stats(self, stats: SpoolStats) -> None:
@@ -477,6 +489,10 @@ class WriterService:
             self._block_reason = (
                 block_reason if state == WorkerState.BLOCKED else None
             )
+            if last_error is not None:
+                self._last_errors.append(
+                    WorkerErrorRecord(ts_ns=time.time_ns(), error=last_error)
+                )
 
     def _run(self) -> None:
         spool: SpoolHandle | None = None

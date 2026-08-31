@@ -34,9 +34,11 @@ must be complete before publication (Bronze → Silver → Gold).
 
 ## Gold
 
-- [ ] **Diagnostics**: diagnostics flow exposing safe configuration
-      (secrets redacted), worker snapshot (state, counters), spool stats,
-      and the most recent errors — downloadable from the UI.
+- [x] **Diagnostics**: diagnostics flow (`diagnostics.py`) exposing safe
+      configuration (password redacted via `async_redact_data`), options,
+      listener + worker snapshot (state, counters, ring of the last 10
+      delivery/schema errors), spool/dead-letter stats, table TTL and the
+      QuestDB build — downloadable from the UI (⋯ → Download diagnostics).
 - [x] Reconfiguration via the UI (options flow with reload on save).
 - [ ] **Full automated test coverage**: run a coverage audit; close the gaps
       (config flow branches, worker state transitions, transport error
