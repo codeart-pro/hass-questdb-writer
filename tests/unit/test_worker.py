@@ -619,6 +619,81 @@ class WriterServiceTests(unittest.TestCase):
         with self.open_spool() as spool:
             self.assertEqual(spool.stats().pending_rows, 1)
 
+    def test_settings_rejects_invalid_values(self) -> None:
+        invalid = {
+            "persist_batch_rows": 0,
+            "persist_batch_rows": "x",
+            "flush_interval_seconds": -1,
+            "flush_interval_seconds": float("nan"),
+            "retry_initial_seconds": 0,
+            "retry_max_seconds": 0.01,
+            "retry_multiplier": 0.5,
+            "retry_jitter_ratio": 2,
+            "flush_on_shutdown": "yes",
+        }
+        for field, value in invalid.items():
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    self.settings(**{field: value})  # type: ignore[arg-type]
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_error_text_truncates_long_messages(self) -> None:
+        from custom_components.hass_questdb_writer.worker import _error_text
+
+        text = _error_text(Exception("x" * 10_000))
+        self.assertLessEqual(len(text), 4_097)
+
+    def test_backoff_rejects_out_of_range_random(self) -> None:
+        from custom_components.hass_questdb_writer.worker import _Backoff
+
+        backoff = _Backoff(
+            self.settings(),
+            random_source=lambda: 2.0,  # type: ignore[arg-type]
+        )
+        with self.assertRaises(ValueError):
+            backoff.next_delay()
+
+    def test_stop_rejects_non_positive_timeout(self) -> None:
+        service = self.service(ScriptedTransport())
+        with self.assertRaises(ValueError):
+            service.stop(timeout_seconds=0)
+
+    def test_service_rejects_invalid_table_and_thread_name(self) -> None:
+        with self.assertRaises(ValueError):
+            WriterService(
+                table="",
+                settings=self.settings(),
+                spool_factory=self.open_spool,
+                transport_factory=lambda: ScriptedTransport(),
+            )
+        with self.assertRaises(ValueError):
+            WriterService(
+                table="ha_events",
+                settings=self.settings(),
+                spool_factory=self.open_spool,
+                transport_factory=lambda: ScriptedTransport(),
+                thread_name="",
+            )
+
+    def test_start_is_one_shot(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        with self.assertRaises(WorkerStartError):
+            service.start(timeout_seconds=1)
+        service.stop(timeout_seconds=1)
+
+    def test_submit_rejects_non_envelope(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        with self.assertRaises(TypeError):
+            service.submit("not-an-envelope")  # type: ignore[arg-type]
+        service.stop(timeout_seconds=1)
+
+    def test_stop_without_start_returns_true(self) -> None:
+        service = self.service(ScriptedTransport())
+        self.assertTrue(service.stop(timeout_seconds=1))
+
+    def test_stop_after_thread_finished_returns_true(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.stop(timeout_seconds=1))
+        self.assertTrue(service.stop(timeout_seconds=1))

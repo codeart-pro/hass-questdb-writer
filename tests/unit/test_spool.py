@@ -375,6 +375,54 @@ os._exit(0)
         with self.assertRaises(SpoolStateError):
             self.open_spool()
 
+    def test_options_reject_invalid_values(self) -> None:
+        with self.assertRaises(ValueError):
+            self.open_spool(max_pending_rows=0)
+        with self.assertRaises(ValueError):
+            self.open_spool(busy_timeout_seconds=0)
+        with self.assertRaises(ValueError):
+            self.open_spool(max_event_bytes=200, max_pending_bytes=100)
+        with self.assertRaises(ValueError):
+            self.open_spool(max_event_bytes=200, max_dead_letter_bytes=100)
+
+    def test_enqueue_rejects_out_of_range_timestamp(self) -> None:
+        with self.open_spool() as spool:
+            with self.assertRaises(ValueError):
+                spool.enqueue("event-1", b"x", 2**70)
+
+    def test_record_attempt_rejects_empty_error_or_duplicate_sequences(
+        self,
+    ) -> None:
+        with self.open_spool() as spool:
+            spool.enqueue("event-1", b"x", 1)
+            batch = spool.peek_batch(max_rows=10, max_bytes=100)
+            sequences = tuple(record.sequence for record in batch)
+            with self.assertRaises(ValueError):
+                spool.record_attempt(
+                    sequences,
+                    last_error="",
+                    delivery_uncertain=False,
+                )
+            with self.assertRaises(ValueError):
+                spool.record_attempt(
+                    (sequences[0], sequences[0]),
+                    last_error="boom",
+                    delivery_uncertain=False,
+                )
+
+    def test_dead_letter_rejects_out_of_range_timestamp(self) -> None:
+        with self.open_spool() as spool:
+            spool.enqueue("event-1", b"x", 1)
+            batch = spool.peek_batch(max_rows=10, max_bytes=100)
+            sequences = tuple(record.sequence for record in batch)
+            with self.assertRaises(ValueError):
+                spool.move_to_dead_letter(
+                    sequences,
+                    last_error="boom",
+                    failed_ns=2**70,
+                    delivery_uncertain=False,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

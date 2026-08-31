@@ -240,6 +240,51 @@ class SchemaManagerTests(unittest.TestCase):
         self.manager_with_retention(transport, 0).ensure("ha_events")
         self.assertNotIn("SET TTL", " ".join(transport.queries))
 
+    def test_ensure_rejects_empty_or_nul_table_name(self) -> None:
+        transport = FakeExecTransport()
+        manager = self.manager(transport)
+        for table in ("", "a\x00b"):
+            with self.subTest(table=table):
+                with self.assertRaises(ValueError):
+                    manager.ensure(table)
+        self.assertEqual(transport.queries, [])
+
+    def test_ensure_propagates_other_permanent_errors(self) -> None:
+        transport = FakeExecTransport()
+        transport.responses = [{"ddl": "OK"}]
+        transport.errors = [
+            PermanentIlpError(
+                "table is read only", retryable=False, delivery_uncertain=False
+            )
+        ]
+        with self.assertRaises(PermanentIlpError):
+            self.manager(transport).ensure("ha_events")
+
+    def test_ensure_rejects_non_dict_show_columns_response(self) -> None:
+        transport = FakeExecTransport()
+        transport.responses = [{"ddl": "OK"}, None]  # type: ignore[list-item]
+        with self.assertRaises(SchemaError):
+            self.manager(transport).ensure("ha_events")
+
+    def test_retention_rejects_malformed_tables_responses(self) -> None:
+        cases = [
+            [{"ddl": "OK"}, {"dataset": self.columns()}, None],  # type: ignore[list-item]
+            [{"ddl": "OK"}, {"dataset": self.columns()}, {"dataset": [123]}],
+            [
+                {"ddl": "OK"},
+                {"dataset": self.columns()},
+                {"dataset": [["ha_events", "not-a-number"]]},
+            ],
+        ]
+        for responses in cases:
+            with self.subTest(responses=responses):
+                transport = FakeExecTransport()
+                transport.responses = responses
+                with self.assertRaises(SchemaError):
+                    self.manager_with_retention(transport, 30).ensure(
+                        "ha_events"
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

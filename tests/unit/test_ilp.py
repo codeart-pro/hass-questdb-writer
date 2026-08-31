@@ -94,3 +94,48 @@ class EncodeRowTests(unittest.TestCase):
                         fields={"value": IlpTimestampMicros(value)},
                         timestamp_ns=1,
                     )
+
+    def test_rejects_non_string_table(self) -> None:
+        with self.assertRaises(IlpEncodingError):
+            encode_row(
+                123,  # type: ignore[arg-type]
+                symbols={},
+                fields={"value": 1},
+                timestamp_ns=1,
+            )
+
+    def test_rejects_table_with_nul(self) -> None:
+        with self.assertRaises(IlpEncodingError):
+            encode_row(
+                "ev\x00ents",
+                symbols={},
+                fields={"value": 1},
+                timestamp_ns=1,
+            )
+
+    def test_rejects_string_field_with_nul(self) -> None:
+        with self.assertRaises(IlpEncodingError):
+            encode_row(
+                "events",
+                symbols={},
+                fields={"value": "a\x00b"},
+                timestamp_ns=1,
+            )
+
+    def test_rejects_unsupported_field_type(self) -> None:
+        with self.assertRaises(IlpEncodingError):
+            encode_row(
+                "events",
+                symbols={},
+                fields={"value": [1, 2]},  # type: ignore[dict-item]
+                timestamp_ns=1,
+            )
+
+    def test_rejects_non_integer_timestamp(self) -> None:
+        with self.assertRaises(IlpEncodingError):
+            encode_row(
+                "events",
+                symbols={},
+                fields={"value": 1},
+                timestamp_ns="now",  # type: ignore[arg-type]
+            )

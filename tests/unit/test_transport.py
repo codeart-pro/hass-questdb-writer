@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import unittest
 
 from custom_components.hass_questdb_writer.transport import (
     AuthenticationIlpError,
     IlpHttpTransport,
+    MAX_ERROR_BODY_BYTES,
     PermanentIlpError,
     RetryableIlpError,
     WRITE_PATH,
@@ -202,3 +204,99 @@ class IlpHttpTransportTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     transport.exec_query(query)  # type: ignore[arg-type]
         self.assertEqual(transport.connection_count, 0)
+
+    def test_constructor_rejects_empty_host(self) -> None:
+        with self.assertRaises(ValueError):
+            IlpHttpTransport("", 9000, use_tls=False, timeout_seconds=5)
+
+    def test_constructor_rejects_out_of_range_port(self) -> None:
+        for port in (0, 70000):
+            with self.subTest(port=port):
+                with self.assertRaises(ValueError):
+                    IlpHttpTransport("q", port, use_tls=False, timeout_seconds=5)
+
+    def test_constructor_rejects_non_positive_timeout(self) -> None:
+        with self.assertRaises(ValueError):
+            IlpHttpTransport("q", 9000, use_tls=False, timeout_seconds=0)
+
+    def test_constructor_rejects_username_without_password(self) -> None:
+        with self.assertRaises(ValueError):
+            IlpHttpTransport(
+                "q", 9000, use_tls=False, timeout_seconds=5, username="u"
+            )
+
+    def test_constructor_rejects_ssl_context_without_tls(self) -> None:
+        with self.assertRaises(ValueError):
+            IlpHttpTransport(
+                "q",
+                9000,
+                use_tls=False,
+                timeout_seconds=5,
+                ssl_context=object(),  # type: ignore[arg-type]
+            )
+
+    def test_tls_uses_https_connection(self) -> None:
+        transport = IlpHttpTransport(
+            "q", 9000, use_tls=True, timeout_seconds=5
+        )
+        connection = transport._make_connection()
+        self.assertIsInstance(connection, http.client.HTTPSConnection)
+
+    def test_send_batch_2xx_overflow_closes_connection(self) -> None:
+        connection = FakeConnection(
+            [FakeResponse(204, b"x" * (MAX_ERROR_BODY_BYTES + 10))]
+        )
+        transport = self.transport(connection)
+        transport.send_batch(b"row\n")
+        self.assertTrue(connection.closed)
+
+    def test_send_batch_permanent_error_truncates_body_and_closes(self) -> None:
+        connection = FakeConnection(
+            [FakeResponse(400, b"x" * (MAX_ERROR_BODY_BYTES + 10))]
+        )
+        transport = self.transport(connection)
+        with self.assertRaises(PermanentIlpError):
+            transport.send_batch(b"row\n")
+        self.assertTrue(connection.closed)
+
+    def test_send_batch_408_is_retryable_uncertain_and_closes(self) -> None:
+        connection = FakeConnection([FakeResponse(408, b"timeout")])
+        transport = self.transport(connection)
+        with self.assertRaises(RetryableIlpError) as caught:
+            transport.send_batch(b"row\n")
+        self.assertTrue(caught.exception.retryable)
+        self.assertTrue(caught.exception.delivery_uncertain)
+        self.assertTrue(connection.closed)
+
+    def test_exec_query_408_is_retryable(self) -> None:
+        transport = self.transport(FakeConnection([FakeResponse(408, b"x")]))
+        with self.assertRaises(RetryableIlpError):
+            transport.exec_query("SELECT 1")
+
+    def test_exec_query_5xx_overflow_truncates_and_closes(self) -> None:
+        connection = FakeConnection(
+            [FakeResponse(500, b"x" * (MAX_ERROR_BODY_BYTES + 10))]
+        )
+        transport = self.transport(connection)
+        with self.assertRaises(RetryableIlpError):
+            transport.exec_query("SELECT 1")
+        self.assertTrue(connection.closed)
+
+    def test_exec_query_2xx_overflow_closes_connection(self) -> None:
+        connection = FakeConnection(
+            [FakeResponse(200, b"x" * (MAX_ERROR_BODY_BYTES + 10))]
+        )
+        transport = self.transport(connection)
+        with self.assertRaises(PermanentIlpError):
+            transport.exec_query("SELECT 1")
+        self.assertTrue(connection.closed)
+
+    def test_exec_query_invalid_json_is_permanent(self) -> None:
+        transport = self.transport(FakeConnection([FakeResponse(200, b"not json")]))
+        with self.assertRaises(PermanentIlpError):
+            transport.exec_query("SELECT 1")
+
+    def test_exec_query_non_object_json_is_permanent(self) -> None:
+        transport = self.transport(FakeConnection([FakeResponse(200, b"[1,2]")]))
+        with self.assertRaises(PermanentIlpError):
+            transport.exec_query("SELECT 1")

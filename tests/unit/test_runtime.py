@@ -67,6 +67,8 @@ class FakeService:
         self.start_error: Exception | None = None
         self.start_timeout: float | None = None
         self.stop_timeout: float | None = None
+        self.stop_result = True
+        self.stop_error: Exception | None = None
 
     def start(self, *, timeout_seconds: float) -> None:
         self.start_timeout = timeout_seconds
@@ -77,7 +79,9 @@ class FakeService:
     def stop(self, *, timeout_seconds: float) -> bool:
         self.stop_timeout = timeout_seconds
         self.timeline.append("worker_stop")
-        return True
+        if self.stop_error is not None:
+            raise self.stop_error
+        return self.stop_result
 
     def submit(self, event: EventEnvelope) -> bool:
         self.events.append(event)
@@ -577,6 +581,102 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await runtime.async_stop()
             delete.assert_called()
             self.assertEqual(delete.call_args.args[2], "auth_failed_entry-1")
+
+    def test_configuration_rejects_empty_table(self) -> None:
+        configuration = self.configuration()
+        with self.assertRaises(ValueError):
+            replace(configuration, table="")
+
+    def test_configuration_rejects_non_positive_timeouts(self) -> None:
+        configuration = self.configuration()
+        for value in (0, -1, True, "10"):  # type: ignore[list-item]
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    replace(
+                        configuration, start_timeout_seconds=value  # type: ignore[arg-type]
+                    )
+
+    def test_configuration_rejects_empty_tracked_entity_ids(self) -> None:
+        configuration = self.configuration()
+        for value in ([], [""]):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    replace(configuration, tracked_entity_ids=value)
+
+    async def test_start_tracks_selected_entities(self) -> None:
+        with patch(
+            "custom_components.hass_questdb_writer.runtime.async_track_state_change_event"
+        ) as track:
+            runtime = HassQuestDbRuntime(
+                self.hass,
+                replace(
+                    self.configuration(),
+                    tracked_entity_ids=("sensor.a",),
+                ),
+                service_factory=lambda: self.service,
+            )
+            await runtime.async_start()
+            track.assert_called_once()
+            self.assertIsNone(self.hass.bus.event_type)
+            await runtime.async_stop()
+
+    async def test_start_failure_logs_when_stop_fails(self) -> None:
+        self.service.start_error = RuntimeError("boom")
+        self.service.stop_result = False
+        runtime = HassQuestDbRuntime(
+            self.hass,
+            self.configuration(),
+            service_factory=lambda: self.service,
+        )
+        with self.assertLogs("custom_components.hass_questdb_writer.runtime"):
+            with self.assertRaises(RuntimeError):
+                await runtime.async_start()
+
+    async def test_start_failure_logs_when_stop_raises(self) -> None:
+        self.service.start_error = RuntimeError("boom")
+        self.service.stop_error = RuntimeError("stop boom")
+        runtime = HassQuestDbRuntime(
+            self.hass,
+            self.configuration(),
+            service_factory=lambda: self.service,
+        )
+        with self.assertLogs("custom_components.hass_questdb_writer.runtime"):
+            with self.assertRaises(RuntimeError):
+                await runtime.async_start()
+
+    async def test_sync_auth_issue_is_noop_without_entry(self) -> None:
+        runtime = HassQuestDbRuntime(
+            self.hass,
+            self.configuration(),
+            service_factory=lambda: self.service,
+        )
+        runtime._sync_auth_issue()
+
+    async def test_monitor_loop_logs_sync_failure(self) -> None:
+        calls = {"n": 0}
+
+        def delete_issue(*args: object, **kwargs: object) -> None:
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("boom")
+
+        with patch(
+            "homeassistant.helpers.issue_registry.async_delete_issue",
+            Mock(side_effect=delete_issue),
+        ):
+            runtime = HassQuestDbRuntime(
+                self.hass,
+                self.configuration(),
+                service_factory=lambda: self.service,
+                entry_id="entry-1",
+                monitor_interval_seconds=0.01,
+            )
+            await runtime.async_start()
+            with self.assertLogs(
+                "custom_components.hass_questdb_writer.runtime"
+            ):
+                await asyncio.sleep(0.05)
+            await runtime.async_stop()
 
 
 if __name__ == "__main__":

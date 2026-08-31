@@ -48,6 +48,36 @@ class EventEnvelopeTests(unittest.TestCase):
         self.assertTrue(encoded.endswith(b" 1700000000121000999\n"))
         self.assertNotIn(b"last_updated=", encoded)
 
+    def test_rejects_non_string_state(self) -> None:
+        with self.assertRaises(EventEnvelopeError):
+            replace(self.event(), state=123)  # type: ignore[arg-type]
+
+    def test_rejects_nul_in_state(self) -> None:
+        with self.assertRaises(EventEnvelopeError):
+            replace(self.event(), state="a\x00b")
+
+    def test_rejects_invalid_attributes_json(self) -> None:
+        with self.assertRaises(EventEnvelopeError):
+            replace(self.event(), attributes_json="not-json")
+
+    def test_from_bytes_rejects_non_bytes_or_empty(self) -> None:
+        for payload in (b"", "text"):  # type: ignore[list-item]
+            with self.subTest(payload=payload):
+                with self.assertRaises(EventEnvelopeError):
+                    EventEnvelope.from_bytes(payload)  # type: ignore[arg-type]
+
+    def test_from_bytes_rejects_non_object_json(self) -> None:
+        with self.assertRaises(EventEnvelopeError):
+            EventEnvelope.from_bytes(b"[1,2]")
+
+    def test_from_bytes_rejects_mismatched_field_types(self) -> None:
+        document = json.loads(self.event().to_bytes().decode("utf-8"))
+        document["event_id"] = 123
+        with self.assertRaises(EventEnvelopeError):
+            EventEnvelope.from_bytes(
+                json.dumps(document).encode("utf-8")
+            )
+
     def test_uses_entity_domain_as_a_symbol(self) -> None:
         encoded = self.event().to_ilp("ha_events")
         self.assertTrue(

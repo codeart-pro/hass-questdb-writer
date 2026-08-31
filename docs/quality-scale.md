@@ -40,9 +40,12 @@ must be complete before publication (Bronze → Silver → Gold).
       delivery/schema errors), spool/dead-letter stats, table TTL and the
       QuestDB build — downloadable from the UI (⋯ → Download diagnostics).
 - [x] Reconfiguration via the UI (options flow with reload on save).
-- [ ] **Full automated test coverage**: run a coverage audit; close the gaps
-      (config flow branches, worker state transitions, transport error
-      classes, schema validation paths, diagnostics).
+- [x] **Full automated test coverage**: coverage audit run (unit +
+      integration in the dev HA container): **95% total** — 6 modules at
+      100% (attribute_filter, const, diagnostics, ilp, schema, transport),
+      event/runtime 99%, config_flow 97%, worker 92%, spool 88%. Known
+      gaps are deep edge branches (dead-letter eviction paths, WAL
+      recovery, shutdown flush, one-shot stop-from-worker guard).
 - [ ] **End-user documentation**: README expanded with use cases, example
       QuestDB queries (`SAMPLE BY`, `LATEST ON`, casts), example
       automations, and links to the sample Grafana dashboards (from the
