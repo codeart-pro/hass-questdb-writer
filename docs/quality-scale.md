@@ -23,8 +23,11 @@ must be complete before publication (Bronze → Silver → Gold).
       corrected (reload).
 - [ ] **Code owners**: non-empty `codeowners` in `manifest.json`
       (add the maintainer's GitHub handle at publication time).
-- [ ] **Recovery without log spam**: backoff + rate-limited warnings are
-      implemented; verify against a long QuestDB outage in the dev stack.
+- [x] **Recovery without log spam**: retries log rate-limited warnings
+      (powers of two: 1, 2, 4, … attempts) saying how long the backoff
+      waits and that events stay in the spool; verified against a live
+      QuestDB outage in the dev stack (spool grows, delivery resumes
+      without loss or duplicates).
 - [x] **Troubleshooting documentation**: `docs/troubleshooting.md`
       (symptoms → causes → fixes: auth, unreachable host, schema mismatch,
       spool/dead-letter limits, TTL), linked from the README.

@@ -945,6 +945,16 @@ class WriterService:
             delay = backoff.next_delay()
             with self._lock:
                 self._retry_attempts += 1
+                attempts = self._retry_attempts
+            if _log_on_power_of_two(attempts):
+                _LOGGER.warning(
+                    "QuestDB delivery failed (%d retries so far): %s; "
+                    "retrying in %.1fs. Events stay in the SQLite spool "
+                    "until delivery succeeds.",
+                    attempts,
+                    error,
+                    delay,
+                )
             self._set_delivery_state(
                 WorkerState.RETRY_WAIT,
                 last_error=error,

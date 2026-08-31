@@ -59,6 +59,17 @@ Delivery is at-least-once: events buffered in the SQLite spool survive a
 HA restart and are re-delivered; the dedup keys make the re-delivery
 idempotent.
 
+## Outage behaviour (verified)
+
+Stopping QuestDB for minutes and starting it again:
+
+- the worker retries with exponential backoff and logs a rate-limited
+  warning (1st, 2nd, 4th, … attempt) telling the user that events stay
+  in the SQLite spool;
+- the spool keeps growing while QuestDB is down;
+- on recovery every buffered event is delivered: the row count matches
+  exactly and no duplicate `(last_updated, entity_id)` groups appear.
+
 ## Getting help
 
 Include in any bug report: HA version, QuestDB version, the integration
