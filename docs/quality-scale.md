@@ -46,12 +46,15 @@ must be complete before publication (Bronze → Silver → Gold).
       event/runtime 99%, config_flow 97%, worker 92%, spool 88%. Known
       gaps are deep edge branches (dead-letter eviction paths, WAL
       recovery, shutdown flush, one-shot stop-from-worker guard).
-- [ ] **End-user documentation**: README expanded with use cases, example
-      QuestDB queries (`SAMPLE BY`, `LATEST ON`, casts), example
-      automations, and links to the sample Grafana dashboards (from the
-      devstack repo).
-- [ ] **Examples**: usable Grafana dashboards and one or two example
-      automations published as part of the docs.
+- [x] **End-user documentation**: README covers use cases, health sensors
+      with a watchdog automation, and verified example queries
+      (`LATEST ON`, `SAMPLE BY` + `CAST(state AS DOUBLE)`, volume via
+      `table_partitions`), plus reading data inside HA with the SQL
+      integration over PGWire (aliased aggregate columns, PGWire
+      defaults, freezing-sensor caveat) and a note about the sample
+      Grafana dashboards in the dev-stack repository.
+- [x] **Examples**: sample Grafana dashboards (dev stack) and a watchdog
+      automation in the README.
 
 ## Release prerequisites (outside the tiers)
 

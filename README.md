@@ -156,6 +156,80 @@ actions:
 mode: single
 ```
 
+## Reading the data
+
+The writer only writes; reading is done with any QuestDB client:
+
+- **Web Console** (`http://<host>:9000`) for ad-hoc queries,
+- **Grafana** with the QuestDB data source (sample dashboards ship in the
+  dev-stack repository),
+- **Home Assistant's built-in SQL integration** over the PostgreSQL wire
+  protocol (`postgresql://admin:quest@questdb:8812/qdb`) to bring values
+  into HA states and automations — see the section below,
+- any PostgreSQL driver (`psycopg2`, `psql`, …).
+
+### Example queries (verified on QuestDB 10)
+
+The table stores one row per state change: `last_updated` (designated
+timestamp), `entity_id`, `domain`, `state` (text), `attributes` (JSON),
+`event_id`, `context_id`, `ingested_at`, `last_changed`.
+
+**Latest value of an entity** (`LATEST ON`, the WHERE clause goes first):
+
+```sql
+SELECT entity_id, state
+FROM hass_questdb_writer_events
+WHERE entity_id = 'sensor.carbon_monoxide'
+LATEST ON last_updated PARTITION BY entity_id;
+```
+
+**Events per hour**:
+
+```sql
+SELECT entity_id, count() AS events
+FROM hass_questdb_writer_events
+WHERE last_updated > dateadd('h', -6, now())
+SAMPLE BY 1h;
+```
+
+**Hourly average of a numeric entity** — states are stored as text, so
+numeric aggregates need a cast:
+
+```sql
+SELECT entity_id, avg(CAST(state AS DOUBLE)) AS avg_state
+FROM hass_questdb_writer_events
+WHERE entity_id = 'sensor.carbon_monoxide'
+  AND last_updated > dateadd('h', -2, now())
+SAMPLE BY 1h;
+```
+
+**Event volume (for retention planning)**:
+
+```sql
+SELECT count(), size_pretty(sum(diskSize)) AS table_size
+FROM table_partitions('hass_questdb_writer_events');
+```
+
+### Reading inside Home Assistant (SQL integration)
+
+Add the SQL integration (UI or YAML) pointing at QuestDB's PostgreSQL
+wire port, alias aggregate columns, and use the sensor like any other:
+
+```yaml
+sql:
+  - name: QuestDB total events
+    db_url: postgresql://admin:***@questdb:8812/qdb
+    query: SELECT count() AS total FROM hass_questdb_writer_events
+    column: total
+    unit_of_measurement: events
+```
+
+Notes: PGWire defaults are `admin`/`quest`; aggregate columns arrive as
+`count()` and must be aliased; no SSL, no `DELETE`, no `HAVING`.
+Sensors **freeze on their last value while QuestDB is down** — build
+watchdog automations on the integration's health sensors instead (see
+above).
+
 ## Data model
 
 Table `hass_questdb_writer_events` (owned by the integration, see
