@@ -241,6 +241,9 @@ Sensors **freeze on their last value while QuestDB is down** — build
 watchdog automations on the integration's health sensors instead (see
 above).
 
+**Alternatives**: [QSS](https://github.com/CM000n/qss) is another
+option for writing HA states to QuestDB.
+
 ## Data model
 
 Table `hass` (owned by the integration, see
