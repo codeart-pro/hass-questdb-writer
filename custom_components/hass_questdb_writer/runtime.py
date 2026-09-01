@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import datetime as dt
 from functools import partial
 import logging
+import ssl
 import math
 from pathlib import Path
 import time
@@ -62,6 +63,16 @@ class ConnectionConfiguration:
     timeout_seconds: float
     username: str | None = None
     password: str | None = None
+    tls_self_signed: bool = False
+
+
+def _tls_context(
+    connection: ConnectionConfiguration,
+) -> ssl.SSLContext | None:
+    """An unverified TLS context for self-signed certificates, or None."""
+    if connection.tls_self_signed:
+        return ssl._create_unverified_context()
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +206,7 @@ class HassQuestDbRuntime:
                 timeout_seconds=configuration.connection.timeout_seconds,
                 username=configuration.connection.username,
                 password=configuration.connection.password,
+                ssl_context=_tls_context(configuration.connection),
             )
 
         def schema_factory() -> IlpSchemaManager:
@@ -205,6 +217,7 @@ class HassQuestDbRuntime:
                 timeout_seconds=configuration.connection.timeout_seconds,
                 username=configuration.connection.username,
                 password=configuration.connection.password,
+                ssl_context=_tls_context(configuration.connection),
                 retention_days=configuration.retention_days,
             )
 

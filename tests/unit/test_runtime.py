@@ -7,6 +7,7 @@ from dataclasses import replace
 import datetime as dt
 import json
 from pathlib import Path
+import ssl
 import tempfile
 from typing import Any
 import unittest
@@ -532,6 +533,23 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
             {"friendly_name": "Denied"},
         )
         await runtime.async_stop()
+
+    async def test_tls_self_signed_produces_unverified_context(self) -> None:
+        from custom_components.hass_questdb_writer.runtime import (
+            ConnectionConfiguration,
+            _tls_context,
+        )
+
+        self.assertIsNone(
+            _tls_context(ConnectionConfiguration(host="q", port=9000, use_tls=True, timeout_seconds=5))
+        )
+        context = _tls_context(
+            ConnectionConfiguration(
+                host="q", port=9000, use_tls=True, timeout_seconds=5, tls_self_signed=True
+            )
+        )
+        self.assertIsNotNone(context)
+        self.assertFalse(context.verify_mode == ssl.CERT_REQUIRED)
 
     async def test_auth_block_creates_repair_issue(self) -> None:
         create = Mock()

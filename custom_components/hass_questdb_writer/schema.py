@@ -10,6 +10,7 @@ dedup upsert keys. A table that differs from the owned schema raises
 
 from __future__ import annotations
 
+import ssl
 from typing import Final
 
 from .transport import (
@@ -145,6 +146,7 @@ class IlpSchemaManager:
         username: str | None = None,
         password: str | None = None,
         retention_days: int = 0,
+        ssl_context: ssl.SSLContext | None = None,
         transport: IlpHttpTransport | None = None,
     ) -> None:
         self._transport = transport or IlpHttpTransport(
@@ -154,6 +156,7 @@ class IlpSchemaManager:
             timeout_seconds=timeout_seconds,
             username=username,
             password=password,
+            ssl_context=ssl_context,
         )
         self._retention_days = retention_days
 

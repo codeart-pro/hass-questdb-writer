@@ -6,6 +6,7 @@ CONF_HOST = "host"
 CONF_PORT = "port"
 CONF_TABLE = "table"
 CONF_USE_TLS = "use_tls"
+CONF_TLS_SELF_SIGNED = "tls_self_signed"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 

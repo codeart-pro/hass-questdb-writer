@@ -32,6 +32,7 @@ from custom_components.hass_questdb_writer.const import (
     CONF_RETRY_MAX_SECONDS,
     CONF_SHOW_ADVANCED,
     CONF_TABLE,
+    CONF_TLS_SELF_SIGNED,
     CONF_USE_TLS,
     CONF_USERNAME,
     DEFAULT_PORT,
@@ -46,6 +47,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             CONF_PORT: 9000,
             CONF_TABLE: "events",
             CONF_USE_TLS: False,
+            CONF_TLS_SELF_SIGNED: False,
             CONF_USERNAME: "",
             CONF_PASSWORD: "",
         }
@@ -96,6 +98,19 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["type"], "create_entry")
         self.assertEqual(result["data"][CONF_USERNAME], "user")
         self.assertEqual(result["data"][CONF_PASSWORD], "pass")
+
+    async def test_tls_self_signed_is_stored(self) -> None:
+        flow = HassQuestDbWriterConfigFlow()
+        with (
+            patch.object(flow, "async_set_unique_id", AsyncMock()),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            result = await flow.async_step_user(
+                self.user_input({CONF_USE_TLS: True, CONF_TLS_SELF_SIGNED: True})
+            )
+        self.assertEqual(result["type"], "create_entry")
+        self.assertTrue(result["data"][CONF_USE_TLS])
+        self.assertTrue(result["data"][CONF_TLS_SELF_SIGNED])
 
     async def test_empty_auth_is_stored_as_none(self) -> None:
         flow = HassQuestDbWriterConfigFlow()

@@ -47,6 +47,7 @@ from .const import (
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
+    CONF_TLS_SELF_SIGNED,
     CONF_USE_TLS,
     CONF_USERNAME,
     DOMAIN,
@@ -139,6 +140,7 @@ def _runtime_configuration(
             ),
             username=data.get(CONF_USERNAME),
             password=data.get(CONF_PASSWORD),
+            tls_self_signed=bool(data.get(CONF_TLS_SELF_SIGNED, False)),
         ),
         worker=WorkerSettings(
             ingress_queue_capacity=options.get(

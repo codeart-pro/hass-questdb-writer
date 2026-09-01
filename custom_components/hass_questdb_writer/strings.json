@@ -10,7 +10,8 @@
           "table": "Table",
           "use_tls": "Use HTTPS",
           "username": "Username (optional)",
-          "password": "Password (optional)"
+          "password": "Password (optional)",
+          "tls_self_signed": "Accept self-signed TLS certificates"
         }
       }
     },

@@ -74,6 +74,7 @@ retention).
 | **Port** | `9000` | QuestDB REST/ILP port, 1–65535 |
 | **Table** | `hass` | UTF-8, ≤ 127 bytes; the integration owns the table |
 | **Use HTTPS** | off | TLS for the REST/ILP connection |
+| **Accept self-signed TLS certificates** | off | skip certificate verification (for self-signed certs on local proxies); only meaningful with Use HTTPS |
 | **Username / password** | empty | HTTP Basic auth; both or neither. Reconfigure keeps the stored password when left empty |
 
 The **Submit** button verifies the connection first: an unreachable host

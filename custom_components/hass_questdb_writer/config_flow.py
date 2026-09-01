@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 from typing import Any
 
 import voluptuous as vol
@@ -57,6 +58,7 @@ from .const import (
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
+    CONF_TLS_SELF_SIGNED,
     CONF_USE_TLS,
     CONF_USERNAME,
     DEFAULT_PORT,
@@ -144,6 +146,10 @@ def _user_schema(values: dict[str, Any]) -> vol.Schema:
             ): str,
             vol.Required(
                 CONF_USE_TLS, default=values.get(CONF_USE_TLS, False)
+            ): bool,
+            vol.Required(
+                CONF_TLS_SELF_SIGNED,
+                default=values.get(CONF_TLS_SELF_SIGNED, False),
             ): bool,
             vol.Optional(
                 CONF_USERNAME, default=values.get(CONF_USERNAME, "")
@@ -387,6 +393,11 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             timeout_seconds=PROVISIONAL_HTTP_TIMEOUT_SECONDS,
             username=data.get(CONF_USERNAME) or None,
             password=data.get(CONF_PASSWORD) or None,
+            ssl_context=(
+                ssl._create_unverified_context()
+                if data.get(CONF_TLS_SELF_SIGNED)
+                else None
+            ),
         )
         await self.hass.async_add_executor_job(transport.exec_query, "select 1")
 
