@@ -55,7 +55,7 @@ options flow owns filters and tuning:
 Positive:
 
 - users configure authentication, filters, and limits entirely through the
-  UI, with translated strings (EN/RU) and selector validation;
+  UI, with translated strings (EN) and selector validation;
 - secrets stay in the config entry storage, never in YAML or logs;
 - the runtime remains unchanged: it still receives explicit configuration
   dataclasses, only the assembly point changed;
