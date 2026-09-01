@@ -169,7 +169,8 @@ While QuestDB is unreachable the writer keeps buffering events in the
 SQLite spool (at-least-once, bounded):
 
 - **Capacity**: 100,000 rows / 64 MiB spool + 1,000 / 16 MiB
-  dead-letter (tunable in Advanced); at a typical 100–500 events/min
+  dead-letter, tunable in **Configure → Show advanced settings**
+  (see [Options](#options) above); at a typical 100–500 events/min
   that covers roughly 3–17 h of downtime
 - **Full spool**: new events are dropped, counted in
   `overflow_events` (visible in diagnostics); the writer keeps retrying
