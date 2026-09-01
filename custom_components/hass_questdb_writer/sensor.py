@@ -204,7 +204,7 @@ class QuestDbTableSizeSensor(SensorEntity):
             rows = result.get("dataset") or []
             size_bytes = int(rows[0][0]) if rows and rows[0][0] is not None else None
             self._attr_native_value = (
-                size_bytes / 1_000_000 if size_bytes is not None else None
+                round(size_bytes / 1_000_000, 1) if size_bytes is not None else None
             )
             self._attr_available = True
         except IlpTransportError:

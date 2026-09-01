@@ -171,7 +171,7 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"dataset": [[1073741824]]}
             )
             await sensor.async_update()
-        self.assertAlmostEqual(sensor.native_value, 1073.741824)
+        self.assertEqual(sensor.native_value, 1073.7)
         self.assertEqual(sensor.native_unit_of_measurement, "MB")
         self.assertIsNone(sensor.device_class)
         self.assertTrue(sensor.available)
