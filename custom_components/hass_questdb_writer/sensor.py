@@ -108,7 +108,7 @@ def _sensor_specs() -> tuple[HealthSensorSpec, ...]:
             state_class=None,
             native_unit=None,
             options=None,
-            extractor=lambda snapshot: snapshot.worker.last_error,
+            extractor=lambda snapshot: snapshot.worker.last_error or "none",
         ),
     )
 

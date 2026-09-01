@@ -132,6 +132,11 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             sensor.native_value, "QuestDB request failed: gaierror"
         )
 
+    async def test_last_error_is_none_when_clean(self) -> None:
+        sensor = self.sensor("last_error")
+        await sensor.async_update()
+        self.assertEqual(sensor.native_value, "none")
+
     async def test_unique_ids_and_device_are_stable(self) -> None:
         sensor = self.sensor("state")
         self.assertEqual(sensor.unique_id, "entry-1-state")

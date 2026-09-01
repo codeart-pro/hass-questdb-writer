@@ -132,7 +132,7 @@ the server is unreachable:
 | `seconds_since_last_delivery` | age of the last successful delivery (s) — **grows during an outage** |
 | `pending_rows_in_spool` | undelivered rows buffered in SQLite |
 | `events_delivered` | total events delivered (total_increasing) |
-| `last_delivery_error` | text of the last delivery error, `unknown` when clean |
+| `last_delivery_error` | text of the last delivery error, `none` when clean |
 
 Because the SQL integration's sensors freeze on their last value while
 QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`
