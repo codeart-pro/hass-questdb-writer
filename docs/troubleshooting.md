@@ -1,6 +1,8 @@
 # Troubleshooting
 
 Symptoms, causes, and fixes for the HASS QuestDB Writer integration.
+QuestDB itself: [quick start](https://questdb.com/docs/getting-started/quick-start/)
+and [Web Console](https://questdb.com/docs/getting-started/web-console/overview/).
 
 ## Nothing is written to QuestDB
 
@@ -42,7 +44,8 @@ produces two rows — that is history, not a duplicate.
 
 ## Data disappears / retention
 
-The **Data retention** advanced option (TTL) makes QuestDB drop whole day
+The **Data retention** advanced option ([QuestDB TTL](https://questdb.com/docs/concepts/ttl/))
+makes QuestDB drop whole day
 partitions older than the window. The TTL applies asynchronously; check
 it with:
 

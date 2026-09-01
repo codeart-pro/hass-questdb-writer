@@ -47,6 +47,12 @@ Copy `custom_components/hass_questdb_writer/` into your Home Assistant
    - **Host / port** — QuestDB REST/ILP endpoint (default port `9000`)
    - **Table** — table name to own (default `hass_questdb_writer_events`)
    - **Username / password** — optional HTTP Basic auth, both or neither
+
+> QuestDB runs **separately** — there is no Home Assistant add-on for it
+> (checked: official and community add-on repositories). Install it any
+> way you like: [Docker container](https://questdb.com/docs/getting-started/quick-start/),
+> package, or binary — the integration just needs a reachable
+> REST/ILP endpoint.
 3. Finish the flow. The worker creates the table on first delivery; nothing
    is written until the schema is created and validated.
 
@@ -98,7 +104,7 @@ benchmarks settle them; they can be left untouched.
 
 | Option | Default | Range | Notes |
 |---|---|---|---|
-| **Data retention (days)** | `0` (no limit) | 0–3650 | QuestDB TTL: day partitions older than the window are dropped automatically (`ALTER TABLE … SET TTL n DAYS`); `0` disables |
+| **Data retention (days)** | `0` (no limit) | 0–3650 | QuestDB [TTL](https://questdb.com/docs/concepts/ttl/): day partitions older than the window are dropped automatically (`ALTER TABLE … SET TTL n DAYS`); `0` disables |
 | **Ingress queue capacity** | `1000` | 10–100000 | in-memory event queue between the HA listener and the SQLite spool |
 | **Max serialized event bytes** | `65536` (64 KiB) | 1024–1048576 | largest event written; larger events are skipped (counted, never crash) |
 | **Persist batch rows** | `100` | 1–10000 | rows per SQLite insert |
@@ -158,7 +164,9 @@ mode: single
 
 ## Reading the data
 
-The writer only writes; reading is done with any QuestDB client:
+The writer only writes; reading is done with any QuestDB client
+([InfluxDB Line Protocol](https://questdb.com/docs/connect/compatibility/ilp/overview/)
+for ingestion, SQL/REST/PGWire for queries):
 
 - **Web Console** (`http://<host>:9000`) for ad-hoc queries,
 - **Grafana** with the QuestDB data source (sample dashboards ship in the
@@ -174,7 +182,8 @@ The table stores one row per state change: `last_updated` (designated
 timestamp), `entity_id`, `domain`, `state` (text), `attributes` (JSON),
 `event_id`, `context_id`, `ingested_at`, `last_changed`.
 
-**Latest value of an entity** (`LATEST ON`, the WHERE clause goes first):
+**Latest value of an entity** ([`LATEST ON`](https://questdb.com/docs/reference/sql/latest-on/),
+the WHERE clause goes first):
 
 ```sql
 SELECT entity_id, state
@@ -183,7 +192,8 @@ WHERE entity_id = 'sensor.carbon_monoxide'
 LATEST ON last_updated PARTITION BY entity_id;
 ```
 
-**Events per hour**:
+**Events per hour** ([`SAMPLE BY`](https://questdb.com/docs/reference/sql/sample-by/),
+[`dateadd`](https://questdb.com/docs/query/functions/date-time/)):
 
 ```sql
 SELECT entity_id, count() AS events
@@ -193,7 +203,7 @@ SAMPLE BY 1h;
 ```
 
 **Hourly average of a numeric entity** — states are stored as text, so
-numeric aggregates need a cast:
+numeric aggregates need a [cast](https://questdb.com/docs/reference/sql/cast/):
 
 ```sql
 SELECT entity_id, avg(CAST(state AS DOUBLE)) AS avg_state
@@ -203,7 +213,7 @@ WHERE entity_id = 'sensor.carbon_monoxide'
 SAMPLE BY 1h;
 ```
 
-**Event volume (for retention planning)**:
+**Event volume (for retention planning)** ([meta functions](https://questdb.com/docs/query/functions/meta/)):
 
 ```sql
 SELECT count(), size_pretty(sum(diskSize)) AS table_size
@@ -212,8 +222,9 @@ FROM table_partitions('hass_questdb_writer_events');
 
 ### Reading inside Home Assistant (SQL integration)
 
-Add the SQL integration (UI or YAML) pointing at QuestDB's PostgreSQL
-wire port, alias aggregate columns, and use the sensor like any other:
+Add the [SQL integration](https://www.home-assistant.io/integrations/sql/) (UI or YAML)
+pointing at QuestDB's [PostgreSQL wire protocol](https://questdb.com/docs/connect/compatibility/pgwire/overview/)
+port, alias aggregate columns, and use the sensor like any other:
 
 ```yaml
 sql:
