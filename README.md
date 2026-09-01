@@ -45,7 +45,7 @@ Copy `custom_components/hass_questdb_writer/` into your Home Assistant
 1. Settings → Devices & Services → Add Integration → **HASS QuestDB Writer**.
 2. Enter the QuestDB connection:
    - **Host / port** — QuestDB REST/ILP endpoint (default port `9000`)
-   - **Table** — table name to own (default `hass_questdb_writer_events`)
+   - **Table** — table name to own (default `hass`)
    - **Username / password** — optional HTTP Basic auth, both or neither
 
 > QuestDB runs **separately** — there is no Home Assistant add-on for it
@@ -72,7 +72,7 @@ retention).
 |---|---|---|
 | **Host** | — | QuestDB host as seen from the HA container (e.g. `questdb`) |
 | **Port** | `9000` | QuestDB REST/ILP port, 1–65535 |
-| **Table** | `hass_questdb_writer_events` | UTF-8, ≤ 127 bytes; the integration owns the table |
+| **Table** | `hass` | UTF-8, ≤ 127 bytes; the integration owns the table |
 | **Use HTTPS** | off | TLS for the REST/ILP connection |
 | **Username / password** | empty | HTTP Basic auth; both or neither. Reconfigure keeps the stored password when left empty |
 
@@ -187,7 +187,7 @@ the WHERE clause goes first):
 
 ```sql
 SELECT entity_id, state
-FROM hass_questdb_writer_events
+FROM hass
 WHERE entity_id = 'sensor.carbon_monoxide'
 LATEST ON last_updated PARTITION BY entity_id;
 ```
@@ -197,7 +197,7 @@ LATEST ON last_updated PARTITION BY entity_id;
 
 ```sql
 SELECT entity_id, count() AS events
-FROM hass_questdb_writer_events
+FROM hass
 WHERE last_updated > dateadd('h', -6, now())
 SAMPLE BY 1h;
 ```
@@ -207,7 +207,7 @@ numeric aggregates need a [cast](https://questdb.com/docs/reference/sql/cast/):
 
 ```sql
 SELECT entity_id, avg(CAST(state AS DOUBLE)) AS avg_state
-FROM hass_questdb_writer_events
+FROM hass
 WHERE entity_id = 'sensor.carbon_monoxide'
   AND last_updated > dateadd('h', -2, now())
 SAMPLE BY 1h;
@@ -217,7 +217,7 @@ SAMPLE BY 1h;
 
 ```sql
 SELECT count(), size_pretty(sum(diskSize)) AS table_size
-FROM table_partitions('hass_questdb_writer_events');
+FROM table_partitions('hass');
 ```
 
 ### Reading inside Home Assistant (SQL integration)
@@ -230,7 +230,7 @@ port, alias aggregate columns, and use the sensor like any other:
 sql:
   - name: QuestDB total events
     db_url: postgresql://admin:***@questdb:8812/qdb
-    query: SELECT count() AS total FROM hass_questdb_writer_events
+    query: SELECT count() AS total FROM hass
     column: total
     unit_of_measurement: events
 ```
@@ -243,7 +243,7 @@ above).
 
 ## Data model
 
-Table `hass_questdb_writer_events` (owned by the integration, see
+Table `hass` (owned by the integration, see
 `docs/architecture.md`): `TIMESTAMP(last_updated) PARTITION BY DAY WAL
 DEDUP UPSERT KEYS(last_updated, entity_id)`.
 

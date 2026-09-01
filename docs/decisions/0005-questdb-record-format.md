@@ -35,7 +35,7 @@ from wall-clock time at the moment of sending.
 The target QuestDB table schema:
 
 ```sql
-CREATE TABLE hass_questdb_writer_events (
+CREATE TABLE hass (
     last_updated TIMESTAMP,
     entity_id SYMBOL,
     domain SYMBOL,

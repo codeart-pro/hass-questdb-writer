@@ -39,7 +39,7 @@ CONF_START_TIMEOUT_SECONDS = "start_timeout_seconds"
 CONF_STOP_TIMEOUT_SECONDS = "stop_timeout_seconds"
 
 DEFAULT_PORT = 9000
-DEFAULT_TABLE = "hass_questdb_writer_events"
+DEFAULT_TABLE = "hass"
 
 # Development profile only. These are explicit and intentionally named
 # provisional until production event-rate, payload-size, disk, and outage tests

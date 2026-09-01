@@ -300,7 +300,7 @@ Logical columns (fixed by
 The table is WAL, partitioned by day, and declared with
 `DEDUP UPSERT KEYS(last_updated, entity_id)`, which makes retried delivery and
 restored-state replays idempotent at the database level. The development table
-name is `hass_questdb_writer_events`.
+name is `hass`.
 
 The integration owns the table. On worker start it runs the `CREATE TABLE IF
 NOT EXISTS` DDL above and then validates an existing table with `SHOW COLUMNS`:
