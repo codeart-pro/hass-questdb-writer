@@ -139,7 +139,7 @@ the server is unreachable:
 | `pending_rows_in_spool` | undelivered rows buffered in SQLite |
 | `events_delivered` | total events delivered (total_increasing) |
 | `last_delivery_error` | text of the last delivery error, `none` when clean |
-| `table_size_on_disk` | on-disk size of the entry's table (B) — **queried from QuestDB**, goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
+| `table_size_on_disk` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB**, goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
 
 Because the SQL integration's sensors freeze on their last value while
 QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`

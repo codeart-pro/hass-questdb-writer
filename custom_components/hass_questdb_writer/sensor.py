@@ -172,8 +172,12 @@ class QuestDbTableSizeSensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}-table_size"
         self._attr_name = "Table size on disk"
         self._attr_icon = "mdi:database-outline"
-        self._attr_device_class = SensorDeviceClass.DATA_SIZE
-        self._attr_native_unit_of_measurement = "B"
+        # No device_class on purpose: DATA_SIZE has a unit converter in
+        # HA which would rewrite the state into the registry unit (B),
+        # fighting our fixed MB. Without a device class the unit is shown
+        # exactly as reported.
+        self._attr_device_class = None
+        self._attr_native_unit_of_measurement = "MB"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="HASS QuestDB Writer",
@@ -198,8 +202,10 @@ class QuestDbTableSizeSensor(SensorEntity):
                 f"SELECT sum(diskSize) FROM table_partitions('{self._table}')",
             )
             rows = result.get("dataset") or []
-            size = int(rows[0][0]) if rows and rows[0][0] is not None else None
-            self._attr_native_value = size
+            size_bytes = int(rows[0][0]) if rows and rows[0][0] is not None else None
+            self._attr_native_value = (
+                size_bytes / 1_000_000 if size_bytes is not None else None
+            )
             self._attr_available = True
         except IlpTransportError:
             self._attr_available = False

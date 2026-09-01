@@ -171,9 +171,9 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
                 return_value={"dataset": [[1073741824]]}
             )
             await sensor.async_update()
-        self.assertEqual(sensor.native_value, 1073741824)
-        self.assertEqual(sensor.native_unit_of_measurement, "B")
-        self.assertEqual(sensor.device_class, SensorDeviceClass.DATA_SIZE)
+        self.assertAlmostEqual(sensor.native_value, 1073.741824)
+        self.assertEqual(sensor.native_unit_of_measurement, "MB")
+        self.assertIsNone(sensor.device_class)
         self.assertTrue(sensor.available)
 
     async def test_table_size_goes_unavailable_on_transport_error(self) -> None:
