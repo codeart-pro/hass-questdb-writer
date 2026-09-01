@@ -26,8 +26,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import (
+    CONF_HOST,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_TABLE,
+    CONF_USE_TLS,
+    CONF_USERNAME,
+    DOMAIN,
+    PROVISIONAL_HTTP_TIMEOUT_SECONDS,
+)
 from .runtime import HassQuestDbRuntime, RuntimeSnapshot
+from .transport import IlpHttpTransport, IlpTransportError
 from .worker import WorkerState
 
 _MANIFEST = json.loads(
@@ -145,6 +155,56 @@ class QuestDbHealthSensor(SensorEntity):
         self._attr_native_value = self._spec.extractor(self._runtime.snapshot())
 
 
+class QuestDbTableSizeSensor(SensorEntity):
+    """On-disk size of the entry's table, queried from QuestDB.
+
+    Unlike the memory-backed health sensors this one talks to QuestDB:
+    while the server is unreachable the sensor goes unavailable (it is
+    a growth monitor, not a watchdog source).
+    """
+
+    _attr_should_poll = True
+
+    def __init__(self, entry: ConfigEntry, table_name: str) -> None:
+        self._entry_data = entry.data
+        self._table = table_name
+        self._transport: IlpHttpTransport | None = None
+        self._attr_unique_id = f"{entry.entry_id}-table_size"
+        self._attr_name = "Table size on disk"
+        self._attr_icon = "mdi:database-outline"
+        self._attr_device_class = SensorDeviceClass.DATA_SIZE
+        self._attr_native_unit_of_measurement = "B"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="HASS QuestDB Writer",
+            manufacturer="HASS QuestDB Writer",
+            sw_version=_MANIFEST["version"],
+        )
+
+    async def async_update(self) -> None:
+        """Query the table partitions size from QuestDB."""
+        if self._transport is None:
+            self._transport = IlpHttpTransport(
+                self._entry_data[CONF_HOST],
+                self._entry_data[CONF_PORT],
+                use_tls=self._entry_data.get(CONF_USE_TLS, False),
+                timeout_seconds=PROVISIONAL_HTTP_TIMEOUT_SECONDS,
+                username=self._entry_data.get(CONF_USERNAME) or None,
+                password=self._entry_data.get(CONF_PASSWORD) or None,
+            )
+        try:
+            result = await self.hass.async_add_executor_job(
+                self._transport.exec_query,
+                f"SELECT sum(diskSize) FROM table_partitions('{self._table}')",
+            )
+            rows = result.get("dataset") or []
+            size = int(rows[0][0]) if rows and rows[0][0] is not None else None
+            self._attr_native_value = size
+            self._attr_available = True
+        except IlpTransportError:
+            self._attr_available = False
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -152,7 +212,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up the writer health sensors for this config entry."""
     runtime: HassQuestDbRuntime = entry.runtime_data
-    async_add_entities(
+    sensors = [
         QuestDbHealthSensor(runtime, entry, spec)
         for spec in _sensor_specs()
+    ]
+    sensors.append(
+        QuestDbTableSizeSensor(entry, entry.data[CONF_TABLE])
     )
+    async_add_entities(sensors)

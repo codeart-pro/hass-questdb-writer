@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.hass_questdb_writer.sensor import (
     QuestDbHealthSensor,
+    QuestDbTableSizeSensor,
     _sensor_specs,
 )
 from custom_components.hass_questdb_writer.runtime import RuntimeSnapshot
@@ -141,6 +142,61 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
         sensor = self.sensor("state")
         self.assertEqual(sensor.unique_id, "entry-1-state")
         self.assertEqual(sensor.device_info["identifiers"], {("hass_questdb_writer", "entry-1")})
+
+    def table_size_sensor(self) -> QuestDbTableSizeSensor:
+        entry = Mock(
+            entry_id="entry-1",
+            data={
+                "host": "questdb",
+                "port": 9000,
+                "table": "hass",
+                "use_tls": False,
+                "username": None,
+                "password": None,
+            },
+        )
+        return QuestDbTableSizeSensor(entry, "hass")
+
+    async def test_table_size_reports_bytes(self) -> None:
+        sensor = self.table_size_sensor()
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(
+                side_effect=lambda fn, *a: fn(*a)
+            )
+        )
+        with patch(
+            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1073741824]]}
+            )
+            await sensor.async_update()
+        self.assertEqual(sensor.native_value, 1073741824)
+        self.assertEqual(sensor.native_unit_of_measurement, "B")
+        self.assertEqual(sensor.device_class, SensorDeviceClass.DATA_SIZE)
+        self.assertTrue(sensor.available)
+
+    async def test_table_size_goes_unavailable_on_transport_error(self) -> None:
+        sensor = self.table_size_sensor()
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(
+                side_effect=lambda fn, *a: fn(*a)
+            )
+        )
+        from custom_components.hass_questdb_writer.transport import (
+            RetryableIlpError,
+        )
+
+        with patch(
+            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                side_effect=RetryableIlpError(
+                    "down", retryable=True, delivery_uncertain=False
+                )
+            )
+            await sensor.async_update()
+        self.assertFalse(sensor.available)
 
 
 if __name__ == "__main__":
