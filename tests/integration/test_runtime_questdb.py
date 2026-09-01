@@ -310,7 +310,10 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [["input_boolean.questdb_test", "on"]],
         )
         snapshot = entry.runtime_data.snapshot()
-        self.assertEqual(snapshot.state_events_excluded, 1)
+        # The filtered_out state change is excluded; the health sensors'
+        # own state changes are excluded as well (allowlist), so the count
+        # is at least 1.
+        self.assertGreaterEqual(snapshot.state_events_excluded, 1)
 
     def test_retention_ttl_applied_and_removed(self) -> None:
         table = "hass_qdb_writer_ttl_integration"

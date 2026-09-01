@@ -67,7 +67,13 @@ class ConfigEntrySetupTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_setup_starts_before_publishing_runtime_data(self) -> None:
-        hass = SimpleNamespace(config=FakeConfig(Path("/config")))
+        hass = SimpleNamespace(
+            config=FakeConfig(Path("/config")),
+            config_entries=Mock(
+                async_forward_entry_setups=AsyncMock(),
+                async_unload_platforms=AsyncMock(),
+            ),
+        )
         entry = self.entry()
         runtime = Mock()
         runtime.async_start = AsyncMock()

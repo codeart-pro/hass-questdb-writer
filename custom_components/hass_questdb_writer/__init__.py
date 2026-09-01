@@ -212,6 +212,7 @@ async def async_setup_entry(
     )
     await runtime.async_start()
     entry.runtime_data = runtime
+    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     return True
 
@@ -220,7 +221,10 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: HassQuestDbConfigEntry
 ) -> bool:
     """Unload a HASS QuestDB Writer config entry."""
-    return await entry.runtime_data.async_stop()
+    unload_ok = await entry.runtime_data.async_stop()
+    if unload_ok:
+        await hass.config_entries.async_unload_platforms(entry, ["sensor"])
+    return unload_ok
 
 
 async def async_update_options(

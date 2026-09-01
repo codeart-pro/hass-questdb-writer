@@ -119,6 +119,43 @@ benchmarks settle them; they can be left untouched.
 | **Start timeout (s)** | `10` | 1–120 | how long setup waits for the worker thread |
 | **Stop timeout (s)** | `15` | 1–300 | how long unload waits for the worker to drain |
 
+## Health sensors
+
+The integration provides five polled sensors (under the device
+**HASS QuestDB Writer**) that read the in-memory writer snapshot — they
+never touch QuestDB, so they keep reporting (and raising alarms) while
+the server is unreachable:
+
+| Entity | Meaning |
+|---|---|
+| `writer_state` | worker state: `new`/`starting`/`running`/`retry_wait`/`blocked`/`stopping`/`stopped`/`failed` |
+| `seconds_since_last_delivery` | age of the last successful delivery (s) — **grows during an outage** |
+| `pending_rows_in_spool` | undelivered rows buffered in SQLite |
+| `events_delivered` | total events delivered (total_increasing) |
+| `last_delivery_error` | text of the last delivery error, `unknown` when clean |
+
+Because the SQL integration's sensors freeze on their last value while
+QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`
+(the health sensor keeps counting up) — not on SQL-derived values:
+
+```yaml
+alias: QuestDB write watchdog
+triggers:
+  - trigger: numeric_state
+    entity_id: sensor.hass_questdb_writer_seconds_since_last_delivery
+    above: 300
+conditions:
+  - condition: numeric_state
+    entity_id: sensor.hass_questdb_writer_seconds_since_last_delivery
+    above: 300
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      title: "⚠️ Запись в QuestDB остановилась"
+      message: "Последняя успешная доставка была более 5 минут назад."
+mode: single
+```
+
 ## Data model
 
 Table `hass_questdb_writer_events` (owned by the integration, see
