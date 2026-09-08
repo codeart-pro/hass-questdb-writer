@@ -53,7 +53,7 @@ class QuestDbIlpConformanceTests(unittest.TestCase):
 
     def test_encoded_values_round_trip_through_questdb(self) -> None:
         entity_id = "sensor.kitchen, west"
-        state = 'строка 1\n"quoted"\\tail'
+        state = 'café 1\n"quoted"\\tail'
         body = encode_row(
             self.table,
             symbols={"entity_id": entity_id},

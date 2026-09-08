@@ -18,7 +18,7 @@ class EventEnvelopeTests(unittest.TestCase):
             event_id="event-1",
             entity_id="sensor.kitchen",
             state='on "quoted"',
-            attributes_json='{"friendly_name":"Кухня","values":[1,true]}',
+            attributes_json='{"friendly_name":"Küche","values":[1,true]}',
             ingested_at_ns=1_700_000_000_223_456_789,
             last_changed_ns=1_700_000_000_120_000_999,
             last_updated_ns=1_700_000_000_121_000_999,
@@ -30,7 +30,7 @@ class EventEnvelopeTests(unittest.TestCase):
         payload = event.to_bytes()
         self.assertEqual(EventEnvelope.from_bytes(payload), event)
         self.assertEqual(EventEnvelope.from_bytes(payload).to_bytes(), payload)
-        self.assertIn("Кухня".encode(), payload)
+        self.assertIn("Küche".encode(), payload)
 
     def test_creates_spool_event_with_ingestion_timestamp(self) -> None:
         event = self.event()

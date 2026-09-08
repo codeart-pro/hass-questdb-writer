@@ -159,8 +159,8 @@ conditions:
 actions:
   - action: notify.mobile_app_phone
     data:
-      title: "⚠️ Запись в QuestDB остановилась"
-      message: "Последняя успешная доставка была более 5 минут назад."
+      title: "⚠️ QuestDB writes have stopped"
+      message: "No event was delivered for over 5 minutes. Check the integration, QuestDB and the network."
 mode: single
 ```
 

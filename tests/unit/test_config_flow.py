@@ -78,7 +78,7 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_table_limit_counts_utf8_bytes(self) -> None:
         flow = HassQuestDbWriterConfigFlow()
         result = await flow.async_step_user(
-            self.user_input({CONF_TABLE: "я" * 64})
+            self.user_input({CONF_TABLE: "ü" * 64})
         )
         self.assertEqual(result["errors"], {"base": "invalid_connection"})
 
