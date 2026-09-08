@@ -105,7 +105,7 @@ benchmarks settle them; they can be left untouched.
 
 | Option | Default | Range | Notes |
 |---|---|---|---|
-| **Data retention (days)** | `0` (no limit) | 0–3650 | QuestDB [TTL](https://questdb.com/docs/concepts/ttl/): day partitions older than the window are dropped automatically (`ALTER TABLE … SET TTL n DAYS`); `0` disables |
+| **Data retention (days)** | `0` (no limit) | 0–3650 | QuestDB [TTL](https://questdb.com/docs/concepts/ttl/): day partitions older than the window are dropped automatically (`ALTER TABLE … SET TTL n DAYS`); `0` disables. Requires QuestDB **Open Source** — Enterprise rejects non-zero TTL (it uses storage policies instead); there the integration logs once and keeps writing without TTL |
 | **Ingress queue capacity** | `1000` | 10–100000 | in-memory event queue between the HA listener and the SQLite spool |
 | **Max serialized event bytes** | `65536` (64 KiB) | 1024–1048576 | largest event written; larger events are skipped (counted, never crash) |
 | **Persist batch rows** | `100` | 1–10000 | rows per SQLite insert |

@@ -284,8 +284,17 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["type"], "create_entry")
 
-        reload_deadline = time.monotonic() + 5
-        while getattr(entry, "runtime_data", None) is first_runtime:
+        # Reload happens asynchronously after the options flow finishes;
+        # runtime_data is None in the middle of it (between unload and
+        # setup), so wait for a *new* runtime, not just for a change.
+        reload_deadline = time.monotonic() + 15
+        while True:
+            runtime_data = getattr(entry, "runtime_data", None)
+            if (
+                runtime_data is not None
+                and runtime_data is not first_runtime
+            ):
+                break
             if time.monotonic() >= reload_deadline:
                 self.fail("options change did not reload the entry")
             await asyncio.sleep(0.01)
@@ -294,7 +303,7 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set("sensor.filtered_out", "42")
         await self.hass.async_block_till_done()
 
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while True:
             result = self.sql_maybe(
                 f"select entity_id, state from {self.table} "

@@ -285,6 +285,40 @@ class SchemaManagerTests(unittest.TestCase):
                         "ha_events"
                     )
 
+    def test_retention_rejection_is_logged_once_and_not_retried(self) -> None:
+        """QuestDB Enterprise rejects non-zero TTL: warn once, keep running."""
+        transport = FakeExecTransport()
+        transport.responses = [{"dataset": [["ha_events", 0, None]]}]
+        transport.errors = [
+            PermanentIlpError(
+                "TTL is not supported on Enterprise tables; use a storage policy instead",
+                retryable=False,
+                delivery_uncertain=False,
+            )
+        ]
+        manager = self.manager_with_retention(transport, 30)
+        with self.assertLogs(
+            "custom_components.hass_questdb_writer.schema", level="WARNING"
+        ) as captured:
+            manager._apply_retention("ha_events")  # noqa: SLF001
+            manager._apply_retention("ha_events")  # noqa: SLF001
+        self.assertIn("rejected the configured retention", captured.output[0])
+        alter_calls = [q for q in transport.queries if "SET TTL" in q]
+        self.assertEqual(len(alter_calls), 1)
+
+    def test_retention_zero_rejection_still_raises(self) -> None:
+        """Clearing a TTL must not be swallowed silently."""
+        transport = FakeExecTransport()
+        transport.responses = [{"dataset": [["ha_events", 30, "DAY"]]}]
+        transport.errors = [
+            PermanentIlpError(
+                "cannot clear", retryable=False, delivery_uncertain=False
+            )
+        ]
+        manager = self.manager_with_retention(transport, 0)
+        with self.assertRaises(PermanentIlpError):
+            manager._apply_retention("ha_events")  # noqa: SLF001
+
 
 if __name__ == "__main__":
     unittest.main()

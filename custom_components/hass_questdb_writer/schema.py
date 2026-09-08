@@ -10,6 +10,8 @@ dedup upsert keys. A table that differs from the owned schema raises
 
 from __future__ import annotations
 
+import logging
+import re
 import ssl
 from typing import Final
 
@@ -18,6 +20,8 @@ from .transport import (
     PermanentIlpError,
     RetryableIlpError,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 EXPECTED_COLUMNS: Final = (
     ("last_updated", "TIMESTAMP"),
@@ -159,6 +163,10 @@ class IlpSchemaManager:
             ssl_context=ssl_context,
         )
         self._retention_days = retention_days
+        # Set once QuestDB rejects a non-zero TTL (e.g. Enterprise, which
+        # requires a storage policy instead): stop retrying and keep the
+        # writer running without TTL.
+        self._ttl_rejected = False
 
     def ensure(self, table: str) -> None:
         """Create the table if missing, then validate it strictly.
@@ -211,14 +219,39 @@ class IlpSchemaManager:
         return ttl if ttl > 0 else None
 
     def _apply_retention(self, table: str) -> None:
-        """Align the table TTL with the configured retention (0 = unlimited)."""
+        """Align the table TTL with the configured retention (0 = unlimited).
+
+        A permanent rejection of a non-zero TTL (QuestDB Enterprise
+        requires a storage policy instead) is logged once and then
+        ignored: retention is optional, and blocking delivery over it
+        would be worse than running without TTL.
+        """
+        if self._ttl_rejected:
+            return
         current = self._read_ttl_days(table)
         desired = self._retention_days
         if current == (desired or None):
             return
-        self._transport.exec_query(
-            f"ALTER TABLE {quote_identifier(table)} SET TTL {desired} DAYS"
-        )
+        if desired == 0:
+            # Clearing a TTL always succeeds on both editions; let other
+            # failures surface as before.
+            self._transport.exec_query(
+                f"ALTER TABLE {quote_identifier(table)} SET TTL 0 DAYS"
+            )
+            return
+        try:
+            self._transport.exec_query(
+                f"ALTER TABLE {quote_identifier(table)} SET TTL {desired} DAYS"
+            )
+        except PermanentIlpError as exc:
+            self._ttl_rejected = True
+            _LOGGER.warning(
+                "QuestDB rejected the configured retention of %s day(s): %s. "
+                "Running without TTL; set the retention option to 0 on "
+                "servers that do not support it (QuestDB Enterprise).",
+                desired,
+                str(exc),
+            )
 
     def close(self) -> None:
         """Close the owned connection; safe to call repeatedly."""
