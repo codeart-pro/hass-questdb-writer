@@ -260,13 +260,93 @@ above).
 **Alternatives**: [QSS](https://github.com/CM000n/qss) is another
 option for writing HA states to QuestDB.
 
+## Troubleshooting
+
+Symptoms, causes, and fixes. QuestDB itself:
+[quick start](https://questdb.com/docs/getting-started/quick-start/)
+and [Web Console](https://questdb.com/docs/getting-started/web-console/overview/).
+
+### Nothing is written to QuestDB
+
+The writer pauses delivery while the schema is being created/validated and
+while the connection is failing. Check the integration state:
+
+1. **Devices & Services → HASS QuestDB Writer → ⋯ → System options**
+   — if a **Repair issue** is shown ("QuestDB rejected the credentials"):
+   the HTTP Basic credentials are wrong. Open **Reconfigure** and update
+   the username/password.
+2. Otherwise open **Settings → System → Logs** and filter by
+   `hass_questdb_writer`. A blocked worker logs the last delivery error
+   (rate-limited, so only a few lines). Typical messages:
+
+   | Message | Meaning | Fix |
+   |---|---|---|
+   | `could not reach QuestDB` / connection refused | Wrong host/port or QuestDB down | Reconfigure; check the host reachability from the HA container |
+   | `HTTP 401` / rejected credentials | Wrong username/password | Reconfigure |
+   | `table ... does not match the owned schema` | Table was created outside the integration (Web Console, Grafana…) | Drop the table, or point the entry at a fresh table name |
+   | `spool is full` | SQLite spool hit its capacity while QuestDB was unreachable | Fix the connection; events stay in the dead letter |
+
+### The table is not created
+
+The table is created by the worker on the first delivery attempt, and only
+when the schema check passes. Nothing is created at setup time. If the
+table is missing after the first event:
+
+- verify the entry host/port from **inside** the HA container — with a
+  podman/docker compose stack, use the **container-network** port (e.g.
+  `questdb:9000`), not the host-published port;
+- check the logs for a schema error (`SHOW COLUMNS` failure).
+
+### Duplicate-looking rows
+
+The table is `DEDUP UPSERT KEYS(last_updated, entity_id)`: re-delivered
+events replace the existing row instead of inserting a second one. A
+state that genuinely changed twice at different `last_updated` values
+produces two rows — that is history, not a duplicate.
+
+### Data disappears / retention
+
+The **Data retention** advanced option ([QuestDB TTL](https://questdb.com/docs/concepts/ttl/))
+makes QuestDB drop whole day
+partitions older than the window. The TTL applies asynchronously; check
+it with:
+
+```sql
+SELECT table_name, ttlValue, ttlUnit FROM tables() WHERE table_name = '…';
+```
+
+`SHOW CREATE TABLE` does not render the TTL clause on deduplicated WAL
+tables even when it is active.
+
+### Restarting Home Assistant
+
+Delivery is at-least-once: events buffered in the SQLite spool survive a
+HA restart and are re-delivered; the dedup keys make the re-delivery
+idempotent.
+
+### Outage behaviour (verified)
+
+Stopping QuestDB for minutes and starting it again:
+
+- the worker retries with exponential backoff and logs a rate-limited
+  warning (1st, 2nd, 4th, … attempt) telling the user that events stay
+  in the SQLite spool;
+- the spool keeps growing while QuestDB is down;
+- on recovery every buffered event is delivered: the row count matches
+  exactly and no duplicate `(last_updated, entity_id)` groups appear.
+
+### Getting help
+
+Include in any bug report: HA version, QuestDB version, the integration
+diagnostics (downloadable from Devices & Services), the log excerpt
+filtered by `hass_questdb_writer`, and the table DDL
+(`SHOW CREATE TABLE …`).
+
 ## Data model
 
-Table `hass` (owned by the integration, see
-`docs/architecture.md`): `TIMESTAMP(last_updated) PARTITION BY DAY WAL
+Table `hass` (owned by the integration):
+`TIMESTAMP(last_updated) PARTITION BY DAY WAL
 DEDUP UPSERT KEYS(last_updated, entity_id)`.
-
-Troubleshooting: see [docs/troubleshooting.md](docs/troubleshooting.md).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -281,23 +361,27 @@ Troubleshooting: see [docs/troubleshooting.md](docs/troubleshooting.md).
 | `last_changed` | TIMESTAMP | |
 
 `unknown` states are skipped by the listener; `unavailable` is written.
-Full record-format rationale: [`docs/decisions/0005-questdb-record-format.md`](docs/decisions/0005-questdb-record-format.md).
 
 ## Architecture
 
-- [`docs/architecture.md`](docs/architecture.md) — pipeline, worker state
-  machine, durability model
-- [`docs/decisions/`](docs/decisions/) — ADRs (0001–0007)
+State changes are captured by a single listener, wrapped into an
+in-memory envelope (`entity_id`, state, attributes as JSON, HA event and
+context ids, `last_updated`/`last_changed`/ingestion timestamps) and
+pushed into a bounded queue. A background worker drains the queue into a
+durable SQLite spool, batches rows and delivers them to QuestDB over
+HTTP/ILP. Delivery is **at-least-once**: while QuestDB is unreachable the
+spool grows (bounded); after recovery the backlog is delivered and the
+dedup keys (`last_updated`, `entity_id`) make re-delivery idempotent.
+The worker is an explicit state machine (`starting → idle/running →
+retry_wait → dead-letter → stopped`) with exponential backoff, and
+survives HA restarts: setup resumes from the spool.
 
 ## Development
 
-The dev environment (compose stack with HA/QuestDB/Grafana, dashboards,
-live-run checklist) lives in the separate
-[`hass-questdb-writer-devstack`](https://github.com/codeart/hass-questdb-writer-devstack)
-repository.
-
-Unit and integration tests run inside a Home Assistant container, see the
-devstack `docs/development.md` for the commands.
+Unit and integration tests run inside a Home Assistant container
+(`pytest tests/unit tests/integration`), pointed at a local QuestDB. The
+dev environment — compose stack with HA/QuestDB/Grafana, dashboards,
+live-run checklist — is kept in a separate private repository.
 
 ## License
 
