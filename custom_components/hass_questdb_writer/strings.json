@@ -1,0 +1,86 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect HASS QuestDB Writer",
+        "description": "Configure the QuestDB ILP/HTTP destination. Leave the credentials empty when QuestDB runs without authentication.",
+        "data": {
+          "host": "QuestDB host",
+          "port": "HTTP port",
+          "table": "Table",
+          "use_tls": "Use HTTPS",
+          "username": "Username (optional)",
+          "password": "Password (optional)",
+          "tls_self_signed": "Accept self-signed TLS certificates"
+        }
+      }
+    },
+    "error": {
+      "invalid_connection": "Enter a non-empty host and table. The UTF-8 table name must not exceed 127 bytes.",
+      "invalid_auth_pair": "Either provide both a username and a password, or leave both empty.",
+      "cannot_connect": "QuestDB is not reachable with these settings. Check the host, port, and TLS setting.",
+      "invalid_auth": "QuestDB rejected these credentials. Check the username and password."
+    },
+    "abort": {
+      "already_configured": "This QuestDB destination and table are already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Entity filter",
+        "description": "Choose which entities are written to QuestDB. Domains and globs are comma-separated, for example: sensor, binary_sensor and sensor.kitchen_*. Attribute patterns also support * and ?, for example: friendly_name, unit_*, rssi.",
+        "data": {
+          "include_entities": "Entities to include",
+          "exclude_entities": "Entities to exclude",
+          "include_domains": "Domains to include",
+          "exclude_domains": "Domains to exclude",
+          "include_entity_globs": "Glob patterns to include",
+          "exclude_entity_globs": "Glob patterns to exclude",
+          "attribute_allowlist": "Attribute patterns to include",
+          "attribute_denylist": "Attribute patterns to exclude",
+          "show_advanced": "Show advanced settings"
+        }
+      },
+      "advanced": {
+        "title": "Advanced settings",
+        "description": "Experimental tuning limits. The defaults are a development profile and are not yet validated for production.",
+        "data": {
+          "ingress_queue_capacity": "Ingress queue capacity (events)",
+          "max_serialized_event_bytes": "Maximum serialized event size (bytes)",
+          "persist_batch_rows": "Persistence batch size (rows)",
+          "delivery_batch_rows": "Delivery batch size (rows)",
+          "delivery_batch_bytes": "Delivery batch size (bytes)",
+          "flush_interval_seconds": "Flush interval (seconds)",
+          "retry_initial_seconds": "Initial retry delay (seconds)",
+          "retry_max_seconds": "Maximum retry delay (seconds)",
+          "retry_multiplier": "Retry delay multiplier",
+          "retry_jitter_ratio": "Retry jitter ratio",
+          "flush_on_shutdown": "Flush a batch on shutdown",
+          "max_pending_rows": "Spool capacity (rows)",
+          "max_pending_bytes": "Spool capacity (bytes)",
+          "max_dead_letter_rows": "Dead-letter capacity (rows)",
+          "max_dead_letter_bytes": "Dead-letter capacity (bytes)",
+          "retention_days": "Data retention (days, 0 = no limit)",
+          "sqlite_busy_timeout_seconds": "SQLite busy timeout (seconds)",
+          "http_timeout_seconds": "HTTP timeout (seconds)",
+          "start_timeout_seconds": "Startup timeout (seconds)",
+          "stop_timeout_seconds": "Shutdown timeout (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_filter": "The entity filter is invalid.",
+      "overlapping_filters": "These items appear in both the include and exclude lists: {conflicts}. Remove them from one of the lists (exclude wins).",
+      "overlapping_item": "This item is also in the opposite list.",
+      "invalid_retry_bounds": "The maximum retry delay must not be below the initial retry delay.",
+      "invalid_size_bounds": "The maximum serialized event size must not exceed the dead-letter byte capacity."
+    }
+  },
+  "issues": {
+    "auth_failed": {
+      "title": "QuestDB rejected the credentials",
+      "description": "QuestDB at {host} rejected the configured username/password. Open the integration and use Reconfigure to update the credentials; the writer stays paused until then."
+    }
+  }
+}
