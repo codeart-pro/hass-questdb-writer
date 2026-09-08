@@ -179,6 +179,25 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(defaults[CONF_USERNAME], "admin")
         self.assertEqual(defaults[CONF_PASSWORD], "")
 
+    async def test_reconfigure_schema_accepts_null_credentials(self) -> None:
+        """Regression: entries whose empty credentials were stored as None
+        crashed the reconfigure form with 'expected str' (voluptuous got a
+        None default for an str field)."""
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            }
+        )
+        result = await flow.async_step_user()
+        defaults = result["data_schema"]({})
+        self.assertEqual(defaults[CONF_USERNAME], "")
+        self.assertEqual(defaults[CONF_PASSWORD], "")
+
     async def test_reconfigure_updates_entry_and_keeps_stored_secret(self) -> None:
         flow = self._reconfigure_flow(
             {

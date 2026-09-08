@@ -137,12 +137,12 @@ def _number(
 def _user_schema(values: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(CONF_HOST, default=values.get(CONF_HOST, "")): str,
+            vol.Required(CONF_HOST, default=values.get(CONF_HOST) or ""): str,
             vol.Required(
-                CONF_PORT, default=values.get(CONF_PORT, DEFAULT_PORT)
+                CONF_PORT, default=values.get(CONF_PORT) or DEFAULT_PORT
             ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
             vol.Required(
-                CONF_TABLE, default=values.get(CONF_TABLE, DEFAULT_TABLE)
+                CONF_TABLE, default=values.get(CONF_TABLE) or DEFAULT_TABLE
             ): str,
             vol.Required(
                 CONF_USE_TLS, default=values.get(CONF_USE_TLS, False)
@@ -152,10 +152,10 @@ def _user_schema(values: dict[str, Any]) -> vol.Schema:
                 default=values.get(CONF_TLS_SELF_SIGNED, False),
             ): bool,
             vol.Optional(
-                CONF_USERNAME, default=values.get(CONF_USERNAME, "")
+                CONF_USERNAME, default=values.get(CONF_USERNAME) or ""
             ): str,
             vol.Optional(
-                CONF_PASSWORD, default=values.get(CONF_PASSWORD, "")
+                CONF_PASSWORD, default=values.get(CONF_PASSWORD) or ""
             ): str,
         }
     )
@@ -260,11 +260,11 @@ def _init_schema(
             ): selector.TextSelector(),
             vol.Optional(
                 CONF_ATTRIBUTE_ALLOWLIST,
-                default=", ".join(options.get(CONF_ATTRIBUTE_ALLOWLIST, [])),
+                default=", ".join(options.get(CONF_ATTRIBUTE_ALLOWLIST) or []),
             ): selector.TextSelector(),
             vol.Optional(
                 CONF_ATTRIBUTE_DENYLIST,
-                default=", ".join(options.get(CONF_ATTRIBUTE_DENYLIST, [])),
+                default=", ".join(options.get(CONF_ATTRIBUTE_DENYLIST) or []),
             ): selector.TextSelector(),
             vol.Optional(CONF_SHOW_ADVANCED, default=False): bool,
         }
