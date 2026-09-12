@@ -13,6 +13,19 @@
           "password": "Password (optional)",
           "tls_self_signed": "Accept self-signed TLS certificates"
         }
+      },
+      "reauth_confirm": {
+        "title": "Update the QuestDB credentials",
+        "description": "QuestDB rejected the stored credentials. Enter the current ones — the host, port and table stay as configured. Leave a field empty to keep the stored value.",
+        "data": {
+          "host": "QuestDB host",
+          "port": "HTTP port",
+          "table": "Table",
+          "use_tls": "Use HTTPS",
+          "username": "Username (optional)",
+          "password": "Password (optional)",
+          "tls_self_signed": "Accept self-signed TLS certificates"
+        }
       }
     },
     "error": {
@@ -22,7 +35,8 @@
       "invalid_auth": "QuestDB rejected these credentials. Check the username and password."
     },
     "abort": {
-      "already_configured": "This QuestDB destination and table are already configured."
+      "already_configured": "This QuestDB destination and table are already configured.",
+      "reauth_successful": "The new credentials were saved and the writer is reloading."
     }
   },
   "options": {

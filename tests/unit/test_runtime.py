@@ -584,6 +584,59 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
             delete.assert_called()
             await runtime.async_stop()
 
+    async def test_auth_block_requests_reauth_once(self) -> None:
+        """The monitor loop asks for a reauth flow once per auth-blocked outage."""
+        requested = Mock()
+        with (
+            patch(
+                "homeassistant.helpers.issue_registry.async_create_issue", Mock()
+            ),
+            patch(
+                "homeassistant.helpers.issue_registry.async_delete_issue", Mock()
+            ),
+        ):
+            self.service.blocked_auth = True
+            runtime = HassQuestDbRuntime(
+                self.hass,
+                self.configuration(),
+                service_factory=lambda: self.service,
+                entry_id="entry-1",
+                monitor_interval_seconds=0.01,
+                request_reauth=requested,
+            )
+            await runtime.async_start()
+            requested.assert_called_once()
+
+            # Still blocked: the following monitor ticks must not queue again.
+            await asyncio.sleep(0.05)
+            requested.assert_called_once()
+
+            # Recovery resets the guard, so the next outage asks again.
+            self.service.blocked_auth = False
+            await asyncio.sleep(0.05)
+            self.service.blocked_auth = True
+            await asyncio.sleep(0.05)
+            self.assertEqual(requested.call_count, 2)
+            await runtime.async_stop()
+
+    async def test_reauth_is_skipped_without_entry(self) -> None:
+        requested = Mock()
+        with patch(
+            "homeassistant.helpers.issue_registry.async_create_issue", Mock()
+        ):
+            self.service.blocked_auth = True
+            runtime = HassQuestDbRuntime(
+                self.hass,
+                self.configuration(),
+                service_factory=lambda: self.service,
+                monitor_interval_seconds=0.01,
+                request_reauth=requested,
+            )
+            await runtime.async_start()
+            await asyncio.sleep(0.03)
+            requested.assert_not_called()
+            await runtime.async_stop()
+
     async def test_auth_issue_is_removed_on_stop(self) -> None:
         delete = Mock()
         with patch(

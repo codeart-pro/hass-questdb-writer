@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import unittest
 
+from homeassistant.exceptions import ConfigEntryNotReady
+
 from custom_components.hass_questdb_writer import (
     _runtime_configuration,
     async_setup_entry,
@@ -19,6 +21,10 @@ from custom_components.hass_questdb_writer.const import (
     CONF_USE_TLS,
     PROVISIONAL_DELIVERY_BATCH_BYTES,
     PROVISIONAL_MAX_PENDING_BYTES,
+)
+from custom_components.hass_questdb_writer.worker import (
+    WorkerStartError,
+    WorkerStartTimeoutError,
 )
 
 
@@ -110,6 +116,34 @@ class ConfigEntrySetupTests(unittest.IsolatedAsyncioTestCase):
             await async_unload_entry(hass, entry)  # type: ignore[arg-type]
         )
         runtime.async_stop.assert_awaited_once_with()
+
+    async def setup_failing_with(self, error: BaseException) -> BaseException:
+        """Run setup with a runtime whose start raises ``error``."""
+        hass = SimpleNamespace(config=FakeConfig(Path("/config")))
+        entry = self.entry()
+        runtime = Mock()
+        runtime.async_start = AsyncMock(side_effect=error)
+        with patch(
+            "custom_components.hass_questdb_writer.HassQuestDbRuntime",
+            return_value=runtime,
+        ):
+            with self.assertRaises(ConfigEntryNotReady) as caught:
+                await async_setup_entry(hass, entry)  # type: ignore[arg-type]
+        self.assertIsNone(entry.runtime_data)
+        raised = caught.exception
+        assert raised is not None
+        return raised
+
+    async def test_worker_start_error_becomes_not_ready(self) -> None:
+        """A worker that cannot start is transient, so HA must retry later."""
+        failure = WorkerStartError("spool could not be opened")
+        caught = await self.setup_failing_with(failure)
+        self.assertIs(caught.__cause__, failure)
+
+    async def test_worker_start_timeout_becomes_not_ready(self) -> None:
+        failure = WorkerStartTimeoutError("worker initialization timed out")
+        caught = await self.setup_failing_with(failure)
+        self.assertIs(caught.__cause__, failure)
 
 
 if __name__ == "__main__":

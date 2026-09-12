@@ -13,6 +13,7 @@ from homeassistant.const import (
     CONF_INCLUDE,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entityfilter import (
     CONF_ENTITY_GLOBS,
     EntityFilter,
@@ -77,7 +78,11 @@ from .runtime import (
     RuntimeConfiguration,
     SpoolConfiguration,
 )
-from .worker import WorkerSettings
+from .worker import (
+    WorkerSettings,
+    WorkerStartError,
+    WorkerStartTimeoutError,
+)
 
 HassQuestDbConfigEntry: TypeAlias = ConfigEntry[HassQuestDbRuntime]
 
@@ -211,8 +216,23 @@ async def async_setup_entry(
         hass,
         _runtime_configuration(hass, entry),
         entry_id=entry.entry_id,
+        # QuestDB rejecting the stored credentials is offered for repair through
+        # the reauthentication flow (ADR-0012); the runtime only asks once per
+        # outage and Home Assistant skips the request when a reauth or
+        # reconfigure flow is already running.
+        request_reauth=lambda: entry.async_start_reauth(hass),
     )
-    await runtime.async_start()
+    try:
+        await runtime.async_start()
+    except (WorkerStartError, WorkerStartTimeoutError) as err:
+        # The worker owns the spool and the delivery thread: if it cannot come
+        # up (spool file not writable yet, disc pressure, slow start) this is
+        # transient, so let Home Assistant retry the setup with its own backoff
+        # instead of leaving the entry in a setup error until a restart.
+        # Anything else (programming or configuration errors) stays fatal.
+        raise ConfigEntryNotReady(
+            f"QuestDB writer did not start: {err}"
+        ) from err
     entry.runtime_data = runtime
     await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
     entry.async_on_unload(entry.add_update_listener(async_update_options))

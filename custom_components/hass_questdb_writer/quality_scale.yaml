@@ -1,0 +1,307 @@
+# Home Assistant integration quality scale.
+#
+# Rule IDs and tiers follow the official scale
+# (https://developers.home-assistant.io/docs/core/integration-quality-scale/) and
+# the rule list in
+# https://github.com/home-assistant/developers.home-assistant/tree/master/docs/core/integration-quality-scale/rules
+#
+# Allowed statuses: `done`, `todo`, `exempt` (with a reason). A missing rule
+# counts as `todo`, so every rule of every tier is listed here.
+#
+# This is a HACS custom integration, not a core integration: a few rules assume
+# core mechanics (brands repository, core team ownership) or a device to talk to
+# and are marked `exempt` for that reason. The narrative — what the project
+# targets, what was verified, and what is deliberately out of scope — lives in
+# docs/quality-scale.md.
+rules:
+  # ------------------------------------------------------------------ Bronze
+  action-setup:
+    status: exempt
+    comment: >-
+      The integration registers no service actions; async_setup_entry only starts
+      the writer and forwards the sensor platform to be set up.
+  appropriate-polling:
+    status: done
+    comment: >-
+      sensor.py declares SCAN_INTERVAL (30 s) for the five in-memory health
+      sensors, and the table-size sensor leaves platform polling for its own
+      5-minute timer (TABLE_SIZE_SCAN_INTERVAL). See ADR-0011.
+  brands:
+    status: done
+    comment: >-
+      custom_components/hass_questdb_writer/brand/icon.png and icon@2x.png.
+      This integration ships its own brand assets; the separate
+      home-assistant/brands repository only applies to core integrations.
+  common-modules:
+    status: done
+    comment: >-
+      The shared base entity lives in entity.py (QuestDbWriterEntity: device
+      registry entry, unique id, has-entity-name contract) and both sensor classes
+      derive from it. No coordinator: this integration pushes data out (listener →
+      spool → worker, ADR-0002, ADR-0003) and has nothing to fetch, so there is no
+      coordinator.py counterpart.
+  config-flow:
+    status: done
+    comment: config_flow.py implements the user, reconfigure and options flows.
+  config-flow-test-coverage:
+    status: done
+    comment: >-
+      tests/unit/test_config_flow.py covers the user, reconfigure and options
+      flows end to end (last audit: 97% for config_flow.py).
+  dependency-transparency:
+    status: exempt
+    comment: >-
+      No third-party dependencies: manifest.json has an empty requirements list
+      and the transport is pure standard-library HTTP (ADR-0001).
+  docs-actions:
+    status: exempt
+    comment: The integration provides no service actions.
+  docs-conditions:
+    status: exempt
+    comment: The integration provides no conditions.
+  docs-high-level-description:
+    status: done
+    comment: README opening section ("Stream every Home Assistant state change ...").
+  docs-installation-instructions:
+    status: done
+    comment: README "## Installation" (HACS and manual) and "## Setup".
+  docs-removal-instructions:
+    status: done
+    comment: >-
+      README "## Removal" gives the three steps (delete the config entry, remove
+      the code through HACS or by hand, clean up what stays behind) and states
+      what survives: the QuestDB table with its history, and the local spool file
+      /config/.storage/hass_questdb_writer/<entry_id>.db, which the integration
+      never deletes.
+  docs-triggers:
+    status: exempt
+    comment: The integration provides no triggers.
+  entity-event-setup:
+    status: done
+    comment: >-
+      Entities subscribe only in lifecycle hooks: the table-size timer is
+      registered in async_added_to_hass and cancelled in
+      async_will_remove_from_hass (sensor.py).
+  entity-unique-id:
+    status: done
+    comment: Every entity sets _attr_unique_id from the entry id plus its key.
+  has-entity-name:
+    status: done
+    comment: >-
+      Both sensor classes set _attr_has_entity_name = True (through the shared base
+      in entity.py) and their labels read as fields of the device (State, Pending
+      rows, Table size, ...). Verified in a throwaway HA 2026.7.2 instance set up
+      through the real config flow: the entity registry reports
+      has_entity_name=True for all six entities and the states render as
+      "HASS QuestDB Writer State" and so on.
+  runtime-data:
+    status: done
+    comment: entry.runtime_data carries HassQuestDbRuntime (__init__.py).
+  test-before-configure:
+    status: done
+    comment: >-
+      The user flow verifies the connection (and the schema) before the entry is
+      created; invalid credentials or an unreachable host are reported in the
+      form instead of being stored.
+  test-before-setup:
+    status: done
+    comment: >-
+      async_setup_entry maps WorkerStartError and WorkerStartTimeoutError to
+      ConfigEntryNotReady, so Home Assistant retries a setup that failed because
+      the writer could not come up; the runtime stops the half-started service
+      before re-raising, and any other exception stays fatal.
+  unique-config-entry:
+    status: done
+    comment: >-
+      The user flow calls async_set_unique_id(host, port, table) and aborts with
+      _abort_if_unique_id_configured (config_flow.py).
+
+  # ------------------------------------------------------------------ Silver
+  action-exceptions:
+    status: exempt
+    comment: The integration provides no service actions.
+  config-entry-unloading:
+    status: done
+    comment: >-
+      async_unload_entry unsubscribes the listener, stops the worker and returns
+      the real stop result; the runtime cleans up the repair issue.
+  docs-configuration-parameters:
+    status: done
+    comment: README "## Options" documents every option with default and range.
+  docs-installation-parameters:
+    status: done
+    comment: >-
+      README "## Setup"/"## Options" document host, port, table, TLS, self-signed
+      certificates, username and password.
+  entity-unavailable:
+    status: done
+    comment: >-
+      The table-size sensor reports unavailable while QuestDB cannot be queried.
+      The health sensors deliberately never go unavailable: they read the
+      in-memory snapshot and are the documented watchdog source for an outage.
+  integration-owner:
+    status: done
+    comment: >-
+      manifest.json declares codeowners: ["@codeart-pro"], the account that owns
+      the public repository. Core organisation ownership does not apply to a HACS
+      integration.
+  log-when-unavailable:
+    status: done
+    comment: >-
+      The table-size sensor logs one warning with the transport error when it goes
+      unavailable and one info line when QuestDB answers again, on the transitions
+      only, so a five-minute refresh interval cannot spam the log during an outage.
+      Unit tests cover the single warning, the single recovery line and silence
+      while healthy. Closed issue #8.
+  parallel-updates:
+    status: done
+    comment: >-
+      sensor.py declares PARALLEL_UPDATES = 1: only the table-size sensor performs
+      I/O (one HTTP query per refresh) and it has no siblings to queue behind, so
+      one update at a time is the honest bound.
+  reauthentication-flow:
+    status: done
+    comment: >-
+      async_step_reauth / async_step_reauth_confirm share the connection form and
+      validation with the user and reconfigure steps, and the runtime asks Home
+      Assistant to start the flow once per auth-blocked outage (ADR-0012). Covered
+      by config-flow unit tests, runtime tests and an end-to-end integration test
+      that opens the flow on a real entry and completes it against real QuestDB.
+  test-coverage:
+    status: done
+    comment: >-
+      Measured in the dev container with coverage 7.15 (unit + integration,
+      --concurrency=thread): total 99.1%, every module above 95% (lowest:
+      config_flow.py 96.9%, spool.py 98.8%, worker.py 99.1%). The remaining
+      uncovered lines are defensive branches, e.g. worker.py 628
+      ("worker task exited before stop was requested").
+
+  # -------------------------------------------------------------------- Gold
+  devices:
+    status: done
+    comment: >-
+      One device per config entry (DeviceInfo with identifiers {(DOMAIN,
+      entry_id)}), created by the sensor platform and removed with the entry.
+  diagnostics:
+    status: done
+    comment: >-
+      diagnostics.py exposes the redacted configuration, the listener and worker
+      snapshots, spool/dead-letter stats and the QuestDB build.
+  discovery:
+    status: exempt
+    comment: >-
+      Nothing to discover: the integration is a service endpoint (QuestDB), not
+      a device, so setup is always user-driven.
+  discovery-update-info:
+    status: exempt
+    comment: No discovery source exists, so there is no discovery info to update.
+  docs-data-update:
+    status: done
+    comment: >-
+      README "## Architecture" describes the listener → queue → spool → ILP path
+      and the at-least-once behaviour; "## Health sensors" states the polling
+      intervals (health 30 s, table size 5 minutes); "## Outage behavior"
+      describes what happens while QuestDB is unreachable.
+  docs-examples:
+    status: done
+    comment: >-
+      README examples: the write watchdog automation and ready-to-use SQL
+      queries (LATEST ON, SAMPLE BY with CAST, table_partitions volume).
+  docs-known-limitations:
+    status: todo
+    comment: >-
+      Limitations exist in the documentation but scattered (SQL-integration
+      sensors freeze during an outage, QuestDB Enterprise rejects non-zero TTL,
+      delivery is at-least-once plus server-side dedup). The rule asks for a
+      section that collects them.
+  docs-supported-devices:
+    status: exempt
+    comment: The integration talks to no devices; it writes to a QuestDB instance.
+  docs-supported-functions:
+    status: done
+    comment: >-
+      README documents the entities it creates, all options, the table schema and
+      how to read the data back (including the SQL integration over PGWire).
+  docs-troubleshooting:
+    status: done
+    comment: >-
+      README "## Troubleshooting" plus docs/troubleshooting.md (symptoms → causes
+      → fixes for auth, unreachable host, schema mismatch, spool/dead-letter
+      limits and TTL).
+  docs-use-cases:
+    status: done
+    comment: >-
+      README illustrates the use cases: an outage watchdog automation, Grafana
+      dashboards over the table, and SQL/Grafana analysis of history.
+  dynamic-devices:
+    status: exempt
+    comment: >-
+      Exactly one device exists per config entry and it is created at setup;
+      there is no hub that can add devices later.
+  entity-category:
+    status: todo
+    comment: >-
+      No _attr_entity_category anywhere. The health and table-size sensors are
+      diagnostics and should carry EntityCategory.DIAGNOSTIC so they stay out of
+      auto-generated dashboards.
+  entity-device-class:
+    status: done
+    comment: >-
+      writer_state uses SensorDeviceClass.ENUM and seconds_since_last_delivery
+      uses DURATION. The remaining entities have no fitting class: row/event
+      counters are plain measurements and last_delivery_error is text.
+  entity-disabled-by-default:
+    status: todo
+    comment: >-
+      All six entities are enabled by default. Candidates for disabling
+      (pending_rows_in_spool, events_delivered, last_delivery_error) conflict
+      with the watchdog design where seconds_since_last_delivery must keep
+      updating every 30 s; the decision needs to be made and documented.
+  entity-translations:
+    status: todo
+    comment: >-
+      Entity names are literals (_attr_name) and no translation keys exist for
+      them; translations/en.json only carries config and options flow strings.
+  exception-translations:
+    status: exempt
+    comment: >-
+      The integration raises no HomeAssistantError (there are no service actions
+      to fail). Config-flow problems are reported through the form's error keys
+      and runtime failures through the repair issue and the log.
+  icon-translations:
+    status: todo
+    comment: >-
+      Icons are set as _attr_icon strings; there is no icons.json and therefore
+      no icon translation keys.
+  reconfiguration-flow:
+    status: done
+    comment: >-
+      async_step_reconfigure reworks the connection data and reloads the entry
+      (ADR-0007).
+  repair-issues:
+    status: done
+    comment: >-
+      A persistent ERROR repair issue is raised when QuestDB rejects the
+      credentials and removed automatically on recovery or unload (ADR-0010).
+  stale-devices:
+    status: exempt
+    comment: >-
+      The single device is bound to the config entry: it disappears when the
+      entry is removed, so there is nothing that can go stale and no
+      async_remove_config_entry_device is needed.
+
+  # ---------------------------------------------------------------- Platinum
+  async-dependency:
+    status: exempt
+    comment: There is no third-party dependency to be async.
+  inject-websession:
+    status: exempt
+    comment: >-
+      No dependency and no websession: the transport is a standard-library HTTP
+      client owned by the worker (ADR-0001).
+  strict-typing:
+    status: todo
+    comment: >-
+      The code is fully annotated, but no strict mypy configuration or check is
+      part of the project, so the rule cannot be claimed. Add a mypy --strict
+      gate (and CI) to close it.

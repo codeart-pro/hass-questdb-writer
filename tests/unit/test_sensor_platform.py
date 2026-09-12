@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.components.sensor import SensorDeviceClass
 
+from custom_components.hass_questdb_writer import sensor as sensor_module
+from custom_components.hass_questdb_writer.entity import QuestDbWriterEntity
 from custom_components.hass_questdb_writer.sensor import (
+    HealthSensorSpec,
     QuestDbHealthSensor,
     QuestDbTableSizeSensor,
     _sensor_specs,
@@ -197,6 +201,236 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             )
             await sensor.async_update()
         self.assertFalse(sensor.available)
+
+
+class TableSizeAvailabilityLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """Silver rule log-when-unavailable: one line per availability transition."""
+
+    logger = "custom_components.hass_questdb_writer.sensor"
+
+    def setUp(self) -> None:
+        self.entry = Mock(
+            entry_id="entry-1",
+            data={
+                "host": "questdb",
+                "port": 9000,
+                "table": "hass",
+                "use_tls": False,
+                "username": None,
+                "password": None,
+            },
+        )
+
+    def sensor(self) -> QuestDbTableSizeSensor:
+        sensor = QuestDbTableSizeSensor(self.entry, "hass")
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
+        )
+        return sensor
+
+    async def test_first_failure_and_recovery_are_logged_once(self) -> None:
+        from custom_components.hass_questdb_writer.transport import (
+            RetryableIlpError,
+        )
+
+        sensor = self.sensor()
+        with patch(
+            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                side_effect=RetryableIlpError(
+                    "connection refused", retryable=True, delivery_uncertain=False
+                )
+            )
+            with self.assertLogs(self.logger, level="WARNING") as logged:
+                await sensor.async_update()
+                await sensor.async_update()
+
+            self.assertFalse(sensor.available)
+            self.assertEqual(len(logged.records), 1)
+            self.assertIn(
+                "connection refused", logged.records[0].getMessage()
+            )
+
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1_000_000]]}
+            )
+            with self.assertLogs(self.logger, level="INFO") as recovered:
+                await sensor.async_update()
+                await sensor.async_update()
+
+        self.assertTrue(sensor.available)
+        self.assertEqual(len(recovered.records), 1)
+        self.assertEqual(sensor.native_value, 1.0)
+
+    async def test_healthy_refreshes_stay_silent(self) -> None:
+        sensor = self.sensor()
+        with patch(
+            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1_000_000]]}
+            )
+            with self.assertNoLogs(self.logger, level="INFO"):
+                await sensor.async_update()
+
+
+class SharedEntityBaseTests(unittest.TestCase):
+    """Rule common-modules: the shared entity plumbing lives in entity.py."""
+
+    def setUp(self) -> None:
+        self.entry = Mock(entry_id="entry-1", data={})
+        self.runtime = Mock(snapshot=runtime_snapshot)
+
+    def test_sensors_derive_from_the_base_entity(self) -> None:
+        self.assertTrue(issubclass(QuestDbHealthSensor, QuestDbWriterEntity))
+        self.assertTrue(issubclass(QuestDbTableSizeSensor, QuestDbWriterEntity))
+        self.assertEqual(
+            QuestDbWriterEntity.__module__,
+            "custom_components.hass_questdb_writer.entity",
+        )
+
+    def test_both_entities_report_the_same_device(self) -> None:
+        health = QuestDbHealthSensor(
+            self.runtime, self.entry, _sensor_specs()[0]
+        )
+        table = QuestDbTableSizeSensor(self.entry, "hass")
+        self.assertEqual(health.device_info, table.device_info)
+        self.assertEqual(health.device_info["name"], "HASS QuestDB Writer")
+        self.assertEqual(
+            health.device_info["identifiers"], {("hass_questdb_writer", "entry-1")}
+        )
+        self.assertEqual(health.unique_id, "entry-1-state")
+        self.assertEqual(table.unique_id, "entry-1-table_size")
+
+
+class SensorNamingTests(unittest.IsolatedAsyncioTestCase):
+    """Bronze rule has-entity-name: labels describe the entity, not the device."""
+
+    def setUp(self) -> None:
+        self.runtime = Mock(snapshot=runtime_snapshot)
+        self.entry = Mock(entry_id="entry-1", data={})
+
+    def health_sensor(self, spec: HealthSensorSpec) -> QuestDbHealthSensor:
+        return QuestDbHealthSensor(self.runtime, self.entry, spec)
+
+    def test_health_sensor_labels_are_device_relative(self) -> None:
+        expected = {
+            "state": "State",
+            "last_success_age": "Seconds since last delivery",
+            "pending_rows": "Pending rows",
+            "delivered_events": "Events delivered",
+            "last_error": "Last delivery error",
+        }
+        names: dict[str, str | None] = {}
+        for spec in _sensor_specs():
+            sensor = self.health_sensor(spec)
+            self.assertTrue(sensor.has_entity_name, spec.key)
+            label = (sensor.name or "").lower()
+            self.assertNotIn("writer", label)
+            self.assertNotIn("questdb", label)
+            names[spec.key] = sensor.name
+        self.assertEqual(names, expected)
+
+    def test_table_size_label_is_device_relative(self) -> None:
+        sensor = QuestDbTableSizeSensor(self.entry, "hass")
+        self.assertTrue(sensor.has_entity_name)
+        self.assertEqual(sensor.name, "Table size")
+
+
+class SensorPollingIntervalTests(unittest.IsolatedAsyncioTestCase):
+    """ADR-0011: explicit platform interval, own timer for the table size."""
+
+    def setUp(self) -> None:
+        self.entry = Mock(
+            entry_id="entry-1",
+            data={
+                "host": "questdb",
+                "port": 9000,
+                "table": "hass",
+                "use_tls": False,
+                "username": None,
+                "password": None,
+            },
+        )
+
+    def table_size_sensor(self) -> QuestDbTableSizeSensor:
+        sensor = QuestDbTableSizeSensor(self.entry, "hass")
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
+        )
+        return sensor
+
+    def test_platform_declares_an_explicit_scan_interval(self) -> None:
+        self.assertEqual(
+            sensor_module.SCAN_INTERVAL, timedelta(seconds=30)
+        )
+
+    def test_platform_limits_parallel_updates(self) -> None:
+        self.assertEqual(sensor_module.PARALLEL_UPDATES, 1)
+
+    def test_health_sensors_keep_using_the_platform_interval(self) -> None:
+        runtime = Mock(snapshot=runtime_snapshot)
+        sensor = QuestDbHealthSensor(runtime, self.entry, _sensor_specs()[0])
+        self.assertTrue(sensor.should_poll)
+
+    def test_table_size_sensor_leaves_platform_polling(self) -> None:
+        self.assertFalse(self.table_size_sensor().should_poll)
+        self.assertEqual(
+            sensor_module.TABLE_SIZE_SCAN_INTERVAL, timedelta(minutes=5)
+        )
+
+    async def test_table_size_sensor_measures_once_and_starts_its_timer(
+        self,
+    ) -> None:
+        sensor = self.table_size_sensor()
+        unsub = Mock()
+        with (
+            patch.object(
+                QuestDbTableSizeSensor, "async_update", AsyncMock()
+            ) as update,
+            patch(
+                "custom_components.hass_questdb_writer.sensor.async_track_time_interval",
+                return_value=unsub,
+            ) as track,
+        ):
+            await sensor.async_added_to_hass()
+
+        update.assert_awaited_once()
+        track.assert_called_once_with(
+            sensor.hass,
+            sensor._async_refresh,
+            timedelta(minutes=5),
+            name="hass_questdb_writer table size",
+        )
+        self.assertIs(sensor._unsub_timer, unsub)
+
+    async def test_timer_callback_refreshes_and_writes_the_state(self) -> None:
+        sensor = self.table_size_sensor()
+        with (
+            patch.object(
+                QuestDbTableSizeSensor, "async_update", AsyncMock()
+            ) as update,
+            patch.object(
+                QuestDbTableSizeSensor, "async_write_ha_state"
+            ) as write_state,
+        ):
+            await sensor._async_refresh(
+                datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc)
+            )
+
+        update.assert_awaited_once()
+        write_state.assert_called_once_with()
+
+    async def test_removal_cancels_the_timer(self) -> None:
+        sensor = self.table_size_sensor()
+        unsub = Mock()
+        sensor._unsub_timer = unsub
+
+        await sensor.async_will_remove_from_hass()
+
+        unsub.assert_called_once_with()
+        self.assertIsNone(sensor._unsub_timer)
 
 
 if __name__ == "__main__":

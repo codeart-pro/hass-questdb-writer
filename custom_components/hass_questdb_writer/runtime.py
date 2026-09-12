@@ -157,6 +157,7 @@ class HassQuestDbRuntime:
         wall_time_ns: Callable[[], int] = time.time_ns,
         entry_id: str | None = None,
         monitor_interval_seconds: float = 30.0,
+        request_reauth: Callable[[], None] | None = None,
     ) -> None:
         self._hass = hass
         self._configuration = configuration
@@ -169,6 +170,8 @@ class HassQuestDbRuntime:
         self._monitor_task: asyncio.Task[None] | None = None
         self._entry_id = entry_id
         self._monitor_interval_seconds = monitor_interval_seconds
+        self._request_reauth = request_reauth
+        self._reauth_requested = False
         self._events_seen = 0
         self._events_accepted = 0
         self._events_without_new_state = 0
@@ -276,7 +279,11 @@ class HassQuestDbRuntime:
         return f"auth_failed_{self._entry_id}"
 
     def _sync_auth_issue(self) -> None:
-        """Create or remove the credentials repair issue for this entry."""
+        """Create or remove the credentials repair issue for this entry.
+
+        A rejected credential set is also offered for repair through the
+        reauthentication flow, once per outage (ADR-0012).
+        """
         if self._entry_id is None:
             return
         snapshot = self._service.snapshot()
@@ -296,8 +303,17 @@ class HassQuestDbRuntime:
                     "host": str(self._configuration.connection.host)
                 },
             )
+            self._request_reauth_once()
         else:
             ir.async_delete_issue(self._hass, DOMAIN, self._issue_id())
+            self._reauth_requested = False
+
+    def _request_reauth_once(self) -> None:
+        """Ask Home Assistant to start a reauthentication flow, once per outage."""
+        if self._reauth_requested or self._request_reauth is None:
+            return
+        self._reauth_requested = True
+        self._request_reauth()
 
     async def _monitor_loop(self) -> None:
         """Periodically reflect the worker auth state in the issue registry."""
