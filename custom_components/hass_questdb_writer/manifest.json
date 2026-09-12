@@ -1,12 +1,12 @@
 {
   "domain": "hass_questdb_writer",
   "name": "HASS QuestDB Writer",
-  "codeowners": ["@codeart"],
+  "codeowners": ["@codeart-pro"],
   "config_flow": true,
-  "documentation": "https://github.com/codeart/hass-questdb-writer",
+  "documentation": "https://github.com/codeart-pro/hass-questdb-writer",
   "integration_type": "service",
   "iot_class": "local_push",
   "platforms": ["sensor"],
   "requirements": [],
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

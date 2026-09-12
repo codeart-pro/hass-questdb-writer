@@ -142,8 +142,9 @@ rules:
   integration-owner:
     status: done
     comment: >-
-      manifest.json declares codeowners: ["@codeart"]. Core organisation
-      ownership does not apply to a HACS integration.
+      manifest.json declares codeowners: ["@codeart-pro"], the account that owns
+      the public repository. Core organisation ownership does not apply to a HACS
+      integration.
   log-when-unavailable:
     status: done
     comment: >-
