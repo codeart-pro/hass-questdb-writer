@@ -4,11 +4,10 @@ Date: 2026-08-29
 
 ## Source
 
-A production QuestDB instance on the private LAN (`http://192.168.1.215:9000`)
-whose table `qss` has been written continuously for months by the
-[QSS](https://github.com/CM000n/qss) Home Assistant component. Inspected
-read-only; the instance has authentication disabled. Used to calibrate the
-record format and sizing decisions of HASS QuestDB Writer.
+A production QuestDB instance on a private LAN whose table `qss` has been written
+continuously for months by the [QSS](https://github.com/CM000n/qss) Home Assistant
+component. Inspected read-only. Used to calibrate the record format and sizing
+decisions of HASS QuestDB Writer.
 
 Table characteristics:
 

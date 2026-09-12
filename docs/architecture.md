@@ -378,13 +378,10 @@ because the quality-scale rule *appropriate-polling* requires a stated interval
 
 ## Development environment
 
-The local podman stack (QuestDB, Home Assistant, Grafana, dashboards) lives
-in the separate
-[`hass-questdb-writer-devstack`](https://github.com/codeart/hass-questdb-writer-devstack)
-repository, which mounts the integration live from this repository. Ports,
-the Grafana credentials (`test`/`test`), the provisioning files, the
-live-run checklist, and the test commands are described in its
-[`docs/development.md`](https://github.com/codeart/hass-questdb-writer-devstack/blob/main/docs/development.md).
+The local podman stack (QuestDB, Home Assistant, Grafana, dashboards) lives in a
+separate, non-public repository that mounts the integration live from this one.
+Ports, the Grafana credentials of the test stack (`test`/`test`), the provisioning
+files, the live-run checklist, and the test commands are documented there.
 
 ## Testing strategy
 
