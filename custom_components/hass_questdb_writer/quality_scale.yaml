@@ -33,13 +33,13 @@ rules:
       This integration ships its own brand assets; the separate
       home-assistant/brands repository only applies to core integrations.
   common-modules:
-    status: todo
+    status: done
     comment: >-
-      No coordinator.py and no shared base entity in entity.py. The writer is a
-      spool + worker architecture (ADR-0002, ADR-0003) rather than a coordinator,
-      and the six sensors share a frozen HealthSensorSpec dataclass instead of a
-      base class. Revisit: the rule expects the coordinator pattern and a base
-      entity module.
+      The shared base entity lives in entity.py (QuestDbWriterEntity: device
+      registry entry, unique id, has-entity-name contract) and both sensor classes
+      derive from it. No coordinator: this integration pushes data out (listener →
+      spool → worker, ADR-0002, ADR-0003) and has nothing to fetch, so there is no
+      coordinator.py counterpart.
   config-flow:
     status: done
     comment: config_flow.py implements the user, reconfigure and options flows.
@@ -66,11 +66,13 @@ rules:
     status: done
     comment: README "## Installation" (HACS and manual) and "## Setup".
   docs-removal-instructions:
-    status: todo
+    status: done
     comment: >-
-      The README has no removal or uninstall instructions (delete the config
-      entry, then remove the custom component / HACS entry, and what happens to
-      the QuestDB table is left implicit).
+      README "## Removal" gives the three steps (delete the config entry, remove
+      the code through HACS or by hand, clean up what stays behind) and states
+      what survives: the QuestDB table with its history, and the local spool file
+      /config/.storage/hass_questdb_writer/<entry_id>.db, which the integration
+      never deletes.
   docs-triggers:
     status: exempt
     comment: The integration provides no triggers.
@@ -84,13 +86,14 @@ rules:
     status: done
     comment: Every entity sets _attr_unique_id from the entry id plus its key.
   has-entity-name:
-    status: todo
+    status: done
     comment: >-
-      No _attr_has_entity_name anywhere. Setting it on the sensors means their
-      names must read as fields of the device ("HASS QuestDB Writer" + name),
-      so the current labels ("Writer state", "Pending rows in spool") would show
-      up as "HASS QuestDB Writer Writer state" and need reworking together with
-      the translation keys (see entity-translations).
+      Both sensor classes set _attr_has_entity_name = True (through the shared base
+      in entity.py) and their labels read as fields of the device (State, Pending
+      rows, Table size, ...). Verified in a throwaway HA 2026.7.2 instance set up
+      through the real config flow: the entity registry reports
+      has_entity_name=True for all six entities and the states render as
+      "HASS QuestDB Writer State" and so on.
   runtime-data:
     status: done
     comment: entry.runtime_data carries HassQuestDbRuntime (__init__.py).
@@ -101,13 +104,12 @@ rules:
       created; invalid credentials or an unreachable host are reported in the
       form instead of being stored.
   test-before-setup:
-    status: todo
+    status: done
     comment: >-
-      async_setup_entry awaits runtime.async_start() and lets worker start
-      failures escape (WorkerStartError/WorkerStartTimeoutError); no
-      ConfigEntryNotReady is raised anywhere, so a transiently unavailable
-      QuestDB leaves the entry in a setup error state instead of being retried
-      by Home Assistant.
+      async_setup_entry maps WorkerStartError and WorkerStartTimeoutError to
+      ConfigEntryNotReady, so Home Assistant retries a setup that failed because
+      the writer could not come up; the runtime stops the half-started service
+      before re-raising, and any other exception stays fatal.
   unique-config-entry:
     status: done
     comment: >-

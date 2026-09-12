@@ -16,30 +16,21 @@ verified and how, and what is deliberately out of scope.
 
 Corrected on 2026-09-12: the earlier version of this file claimed
 "Bronze — baseline (done)" from the tier *characteristics* instead of the rule
-list. A rule-by-rule pass found four open Bronze rules.
+list. The rule-by-rule pass found four open Bronze rules, all four of which were
+closed the same day (`has-entity-name`, `test-before-setup`,
+`docs-removal-instructions`, `common-modules`).
 
 ## Current status (2026-09-12, rule-by-rule)
 
 | Tier | done | open (todo) | exempt | Tier claimable |
 |---|---:|---:|---:|---|
-| Bronze | 11 | 4 | 5 | **no** — 4 rules open |
-| Silver | 5 | 4 | 1 | no — and Bronze must be complete first |
+| Bronze | 15 | 0 | 5 | **yes** |
+| Silver | 5 | 4 | 1 | no — 4 rules open |
 | Gold | 10 | 5 | 6 | no |
 | Platinum | 0 | 1 | 2 | not targeted |
 
 Open rules, with the reason recorded in the YAML:
 
-- **Bronze**
-  - `has-entity-name` — no `_attr_has_entity_name`; renaming the entities to
-    device-relative names is part of closing it.
-  - `test-before-setup` — `async_setup_entry` lets worker start failures escape
-    instead of raising `ConfigEntryNotReady`, so a transiently unavailable
-    QuestDB ends in a setup error instead of an automatic retry.
-  - `docs-removal-instructions` — the README does not explain how to remove the
-    integration.
-  - `common-modules` — no `coordinator.py` and no shared base entity in
-    `entity.py`; the worker architecture is deliberate (ADR-0002, ADR-0003), but
-    the rule expects those modules to exist.
 - **Silver**
   - `test-coverage` — the last audit reached 95% overall with worker at 92% and
     spool at 88%; the rule wants above 95% for every module.
@@ -98,6 +89,23 @@ transparency).
   `SAMPLE BY` + `CAST(state AS DOUBLE)`, volume via `table_partitions`), reading
   data inside HA with the SQL integration over PGWire, troubleshooting
   (plus `docs/troubleshooting.md`), the data model and the architecture.
+- **Entity naming** (`has-entity-name`): both sensor classes set
+  `_attr_has_entity_name = True` through the shared base in `entity.py`. A
+  throwaway HA 2026.7.2 instance set up through the real config flow reports
+  `has_entity_name=True` for all six entities and renders "HASS QuestDB Writer
+  State", "HASS QuestDB Writer Table size", and so on; installs that already have
+  the entities keep their entity IDs.
+- **Setup retry** (`test-before-setup`): worker start failures
+  (`WorkerStartError`, `WorkerStartTimeoutError`) are mapped to
+  `ConfigEntryNotReady`, so Home Assistant retries the setup instead of leaving the
+  entry in a setup error. The runtime stops the half-started service first, and any
+  other exception stays fatal.
+- **Shared entity module** (`common-modules`): the device registry entry, the
+  unique id and the naming contract are defined once in `entity.py`. There is no
+  coordinator because the integration pushes data out rather than fetching it.
+- **Removal** (`docs-removal-instructions`): README "## Removal" lists the three
+  steps and states what a removal leaves behind — the QuestDB table with its
+  history and the SQLite spool under `.storage/hass_questdb_writer/`.
 
 ## Keeping this honest
 
