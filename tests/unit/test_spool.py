@@ -9,9 +9,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, PropertyMock, patch
 
 from custom_components.hass_questdb_writer.spool import (
     BatchLimitTooSmallError,
+    DeadLetterFullError,
     EventTooLargeError,
     NewSpoolEvent,
     SQLiteSpool,
@@ -422,6 +424,177 @@ os._exit(0)
                     failed_ns=2**70,
                     delivery_uncertain=False,
                 )
+
+
+class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
+    """Guards, wrappers and no-op paths (rule test-coverage)."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.path = Path(self.temporary_directory.name) / "events.db"
+
+    def open_spool(self, **overrides: object) -> SQLiteSpool:
+        options: dict[str, object] = {
+            "max_pending_rows": 10,
+            "max_pending_bytes": 100,
+            "max_event_bytes": 50,
+            "max_dead_letter_rows": 10,
+            "max_dead_letter_bytes": 100,
+            "busy_timeout_seconds": 0.25,
+        }
+        options.update(overrides)
+        return SQLiteSpool(self.path, **options)  # type: ignore[arg-type]
+
+    def test_constructor_rejects_inconsistent_limits(self) -> None:
+        with self.assertRaises(ValueError):
+            self.open_spool(max_event_bytes=60, max_pending_bytes=50)
+        with self.assertRaises(ValueError):
+            self.open_spool(max_event_bytes=60, max_dead_letter_bytes=50)
+        with self.assertRaises(ValueError):
+            self.open_spool(busy_timeout_seconds=0)
+
+    def test_constructor_wraps_sqlite_failures(self) -> None:
+        with patch.object(
+            sqlite3, "connect", side_effect=sqlite3.OperationalError("boom")
+        ):
+            with self.assertRaises(SpoolError) as caught:
+                self.open_spool()
+        self.assertIn("failed to initialize", str(caught.exception))
+
+    def test_missing_stats_row_is_reported(self) -> None:
+        with self.open_spool() as spool:
+            other = sqlite3.connect(self.path)
+            other.execute("DELETE FROM spool_stats")
+            other.commit()
+            other.close()
+            with self.assertRaises(SpoolStateError):
+                spool.stats()
+
+    def test_event_validators_reject_bad_input(self) -> None:
+        with self.open_spool() as spool:
+            with self.assertRaises(TypeError):
+                spool.enqueue_many(("not-an-event",))  # type: ignore[arg-type]
+            with self.assertRaises(ValueError):
+                spool.enqueue_many((NewSpoolEvent("", b"one", 1),))
+            with self.assertRaises(ValueError):
+                spool.enqueue_many((NewSpoolEvent("id\x00suffix", b"one", 1),))
+            with self.assertRaises(ValueError):
+                spool.enqueue_many((NewSpoolEvent("event-1", b"", 1),))
+
+    def test_attempt_validators_reject_bad_input(self) -> None:
+        with self.open_spool() as spool:
+            spool.enqueue("event-1", b"one", 1)
+            with self.assertRaises(ValueError):
+                spool.record_attempt(
+                    [1], last_error="boom", delivery_uncertain="yes"  # type: ignore[arg-type]
+                )
+            with self.assertRaises(ValueError):
+                spool.move_to_dead_letter(
+                    [1],
+                    last_error="boom",
+                    failed_ns=1,
+                    delivery_uncertain=None,  # type: ignore[arg-type]
+                )
+
+    def test_no_operation_calls_are_noops(self) -> None:
+        with self.open_spool() as spool:
+            self.assertEqual(spool.enqueue_many(()), 0)
+            self.assertEqual(spool.mark_delivered([]), 0)
+            self.assertEqual(
+                spool.record_attempt(
+                    [], last_error="boom", delivery_uncertain=False
+                ),
+                0,
+            )
+            self.assertEqual(
+                spool.move_to_dead_letter(
+                    [],
+                    last_error="boom",
+                    failed_ns=1,
+                    delivery_uncertain=False,
+                ),
+                (0, 0),
+            )
+            self.assertEqual(spool.delete_dead_letters([]), 0)
+
+    def test_missing_sequences_are_reported(self) -> None:
+        with self.open_spool() as spool:
+            spool.enqueue("event-1", b"one", 1)
+            with self.assertRaises(SpoolStateError):
+                spool.record_attempt(
+                    [999], last_error="boom", delivery_uncertain=False
+                )
+            with self.assertRaises(SpoolStateError):
+                spool.move_to_dead_letter(
+                    [999],
+                    last_error="boom",
+                    failed_ns=1,
+                    delivery_uncertain=False,
+                )
+
+    def test_sqlite_failures_are_wrapped(self) -> None:
+        with self.open_spool() as spool:
+            spool.enqueue("event-1", b"one", 1)
+            broken = Mock()
+            broken.execute.side_effect = sqlite3.OperationalError("boom")
+            with patch.object(
+                SQLiteSpool, "_db", new_callable=PropertyMock, return_value=broken
+            ):
+                for call in (
+                    lambda: spool.enqueue_many((NewSpoolEvent("event-2", b"two", 2),)),
+                    lambda: spool.peek_batch(max_rows=1, max_bytes=10),
+                    lambda: spool.mark_delivered([1]),
+                    lambda: spool.record_attempt(
+                        [1], last_error="boom", delivery_uncertain=False
+                    ),
+                    lambda: spool.move_to_dead_letter(
+                        [1],
+                        last_error="boom",
+                        failed_ns=1,
+                        delivery_uncertain=False,
+                    ),
+                    lambda: spool.peek_dead_letters(limit=1),
+                    lambda: spool.delete_dead_letters([1]),
+                ):
+                    with self.assertRaises(SpoolError):
+                        call()
+
+    def test_counters_follow_out_of_band_changes(self) -> None:
+        """The triggers keep the counters honest, so the full-store guard is defensive.
+
+        `move_to_dead_letter` still raises DeadLetterFullError when the counters
+        claim space that the store does not have; because the schema maintains
+        `spool_stats` with triggers on both tables, that can only happen with a
+        broken database, not through normal eviction.
+        """
+        with self.open_spool(max_dead_letter_rows=1) as spool:
+            spool.enqueue("event-1", b"one", 1)
+            spool.move_to_dead_letter(
+                [1], last_error="boom", failed_ns=1, delivery_uncertain=False
+            )
+            self.assertEqual(spool.stats().dead_letter_rows, 1)
+
+            other = sqlite3.connect(self.path)
+            other.execute("DELETE FROM dead_letter")
+            other.commit()
+            other.close()
+
+            self.assertEqual(spool.stats().dead_letter_rows, 0)
+            self.assertEqual(spool.stats().dead_letter_bytes, 0)
+            spool.enqueue("event-2", b"two", 2)
+            self.assertEqual(
+                spool.move_to_dead_letter(
+                    [2], last_error="boom", failed_ns=1, delivery_uncertain=False
+                ),
+                (1, 0),
+            )
+
+    def test_close_rolls_back_an_open_transaction(self) -> None:
+        spool = self.open_spool()
+        spool._db.execute("BEGIN IMMEDIATE")
+        spool.close()
+        self.assertIsNone(spool._connection)
 
 
 if __name__ == "__main__":

@@ -2,31 +2,42 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import replace
+import json
 from pathlib import Path
 from threading import Event, Lock
 import tempfile
 import time
 import unittest
+from unittest.mock import Mock
 
 from custom_components.hass_questdb_writer.event import EventEnvelope
 from custom_components.hass_questdb_writer.schema import SchemaMismatchError
 from custom_components.hass_questdb_writer.spool import (
+    DeadLetterFullError,
     NewSpoolEvent,
+    SpoolError,
+    SpoolFullError,
     SQLiteSpool,
+    SpoolRecord,
+    SpoolStats,
 )
 from custom_components.hass_questdb_writer.transport import (
     AuthenticationIlpError,
+    IlpTransportError,
     PermanentIlpError,
     RetryableIlpError,
 )
 from custom_components.hass_questdb_writer.worker import (
+    WorkerConfigurationError,
     WorkerSettings,
     WorkerStartError,
     WorkerStartTimeoutError,
     WorkerState,
     WriterService,
+    _Backoff,
 )
 
 
@@ -99,6 +110,67 @@ class BlockingTransport(ScriptedTransport):
         if not self.send_release.wait(2):
             raise TimeoutError("test did not release transport")
         super().send_batch(payload)
+
+
+class ScriptedSpool:
+    """Minimal spool double for the delivery-path guards.
+
+    Only the methods the guards call are implemented; reading stats or writing
+    rows is an error, so a guard test can never pass by accident.
+    """
+
+    def __init__(
+        self,
+        records: tuple[SpoolRecord, ...] = (),
+        *,
+        move_error: BaseException | None = None,
+    ) -> None:
+        self.records = records
+        self.move_error = move_error
+        self.moves: list[tuple[int, ...]] = []
+        self.attempts: list[tuple[int, ...]] = []
+        self.delivered: list[tuple[int, ...]] = []
+
+    def peek_batch(
+        self, *, max_rows: int, max_bytes: int
+    ) -> tuple[SpoolRecord, ...]:
+        return tuple(self.records[:max_rows])
+
+    def move_to_dead_letter(
+        self,
+        sequences: tuple[int, ...],
+        *,
+        last_error: str,
+        failed_ns: int,
+        delivery_uncertain: bool,
+    ) -> tuple[int, int]:
+        if self.move_error is not None:
+            raise self.move_error
+        self.moves.append(tuple(sequences))
+        return (len(tuple(sequences)), 0)
+
+    def record_attempt(
+        self,
+        sequences: tuple[int, ...],
+        *,
+        last_error: str,
+        delivery_uncertain: bool,
+    ) -> int:
+        self.attempts.append(tuple(sequences))
+        return len(tuple(sequences))
+
+    def mark_delivered(self, sequences: tuple[int, ...]) -> int:
+        self.delivered.append(tuple(sequences))
+        return len(tuple(sequences))
+
+    def enqueue_many(self, events: object) -> int:
+        raise AssertionError("the guards under test must not persist events")
+
+    def stats(self) -> SpoolStats:
+        raise AssertionError("the guards under test must not read spool stats")
+
+    def close(self) -> None:
+        """Nothing to release: the double owns no resources."""
 
 
 class WriterServiceTests(unittest.TestCase):
@@ -697,3 +769,310 @@ class WriterServiceTests(unittest.TestCase):
         service.start(timeout_seconds=1)
         self.assertTrue(service.stop(timeout_seconds=1))
         self.assertTrue(service.stop(timeout_seconds=1))
+
+    # --- defensive branches (rule test-coverage) ---------------------------
+
+    def spool_record(
+        self, sequence: int, payload: bytes, *, uncertain: bool = False
+    ) -> SpoolRecord:
+        return SpoolRecord(
+            sequence=sequence,
+            event_id=f"event-{sequence}",
+            payload=payload,
+            created_ns=1,
+            attempt_count=0,
+            last_error=None,
+            delivery_uncertain=uncertain,
+        )
+
+    def test_settings_reject_zero_flush_interval(self) -> None:
+        with self.assertRaises(ValueError):
+            self.settings(flush_interval_seconds=0)
+
+    def test_start_reports_worker_initialization_failure(self) -> None:
+        def broken_spool() -> object:
+            raise SpoolError("spool unavailable")
+
+        service = WriterService(
+            table="ha_events",
+            settings=self.settings(),
+            spool_factory=broken_spool,
+            transport_factory=lambda: ScriptedTransport(),
+        )
+        self.services.append(service)
+        with self.assertRaises(WorkerStartError) as caught:
+            service.start(timeout_seconds=1)
+        self.assertIn("spool unavailable", str(caught.exception))
+
+    def test_stop_from_the_worker_thread_is_rejected(self) -> None:
+        captured: list[BaseException] = []
+        holder: list[WriterService] = []
+
+        class SelfStoppingSpool:
+            """Spool whose reads ask the service to stop from the worker thread."""
+
+            def __init__(self, inner: SQLiteSpool) -> None:
+                self._inner = inner
+
+            def peek_batch(
+                self, *, max_rows: int, max_bytes: int
+            ) -> tuple[SpoolRecord, ...]:
+                try:
+                    holder[0].stop(timeout_seconds=0.5)
+                except BaseException as exc:  # noqa: BLE001 - asserting type
+                    captured.append(exc)
+                return self._inner.peek_batch(max_rows=max_rows, max_bytes=max_bytes)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        service = WriterService(
+            table="ha_events",
+            settings=self.settings(delivery_batch_rows=1),
+            # Built on the worker thread: SQLite connections are thread-bound.
+            spool_factory=lambda: SelfStoppingSpool(self.open_spool()),  # type: ignore[arg-type]
+            transport_factory=lambda: ScriptedTransport(),
+        )
+        self.services.append(service)
+        holder.append(service)
+        service.start(timeout_seconds=1)
+        service.submit(self.event(1))
+        self.wait_for(lambda: bool(captured))
+        self.assertIsInstance(captured[0], RuntimeError)
+        self.assertIn("join itself", str(captured[0]))
+        service.stop(timeout_seconds=1)
+
+    def test_cleanup_failure_marks_the_worker_failed(self) -> None:
+        class BrokenCloseSpool:
+            def __init__(self, inner: SQLiteSpool) -> None:
+                self._inner = inner
+
+            def close(self) -> None:
+                raise RuntimeError("close failed")
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        service = WriterService(
+            table="ha_events",
+            settings=self.settings(),
+            # Built on the worker thread: SQLite connections are thread-bound.
+            spool_factory=lambda: BrokenCloseSpool(self.open_spool()),  # type: ignore[arg-type]
+            transport_factory=lambda: ScriptedTransport(),
+        )
+        self.services.append(service)
+        service.start(timeout_seconds=1)
+        service.stop(timeout_seconds=1)
+        self.wait_for(lambda: service.snapshot().state is WorkerState.FAILED)
+        self.assertIn("close failed", service.snapshot().last_error or "")
+
+    def test_persist_held_with_nothing_held_is_a_noop(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        with self.open_spool() as spool:
+            self.assertTrue(service._persist_held(spool, []))
+        service.stop(timeout_seconds=1)
+
+    def test_full_spool_and_shutdown_deadline_are_reported(self) -> None:
+        class FullSpool:
+            def __init__(self, inner: SQLiteSpool) -> None:
+                self._inner = inner
+
+            def enqueue_many(self, events: object) -> int:
+                raise SpoolFullError("pending rows limit reached")
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        service = WriterService(
+            table="ha_events",
+            settings=self.settings(),
+            spool_factory=lambda: FullSpool(self.open_spool()),  # type: ignore[arg-type]
+            transport_factory=lambda: ScriptedTransport(),
+        )
+        self.services.append(service)
+        service.start(timeout_seconds=1)
+        service.submit(self.event(1))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        self.assertIn(
+            "pending rows limit reached", service.snapshot().last_error or ""
+        )
+
+        service.stop(timeout_seconds=0.05)
+        self.wait_for(lambda: service.snapshot().state is WorkerState.FAILED)
+        self.assertIn("unpersisted", service.snapshot().last_error or "")
+
+    def test_signal_loop_ignores_a_closed_loop(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        closed = Mock(
+            is_running=Mock(return_value=True),
+            call_soon_threadsafe=Mock(side_effect=RuntimeError("loop closed")),
+        )
+        service._loop = closed
+        self.assertTrue(service.submit(self.event(1)))
+        closed.call_soon_threadsafe.assert_called_once()
+        service.stop(timeout_seconds=1)
+
+    def test_wait_events_with_zero_timeout_returns(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        asyncio.run(service._wait_events([], 0))
+        service.stop(timeout_seconds=1)
+
+    def test_build_batch_without_records_returns_none(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        self.assertIsNone(service._build_batch(ScriptedSpool(), isolate_next=False))
+        service.stop(timeout_seconds=1)
+
+    def test_build_batch_stops_at_an_undecodable_row(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        spool = ScriptedSpool(
+            (
+                self.spool_record(1, self.event(1).to_bytes()),
+                self.spool_record(2, b"not-json"),
+            )
+        )
+        built = service._build_batch(spool, isolate_next=False)
+        assert built is not None
+        self.assertEqual(built.sequences, (1,))
+        self.assertEqual(spool.moves, [])
+        service.stop(timeout_seconds=1)
+
+    def test_build_batch_reports_a_full_dead_letter_store(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        spool = ScriptedSpool(
+            (self.spool_record(1, b"not-json"),),
+            move_error=DeadLetterFullError("dead-letter store is full"),
+        )
+        self.assertIsNone(service._build_batch(spool, isolate_next=False))
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.state, WorkerState.BLOCKED)
+        self.assertIn("dead-letter store is full", snapshot.last_error or "")
+        service.stop(timeout_seconds=1)
+
+    def test_build_batch_rejects_an_oversized_event(self) -> None:
+        oversized = EventEnvelope(
+            event_id="event-1",
+            entity_id="sensor.test",
+            state="on",
+            attributes_json=json.dumps({"blob": "x" * 2000}),
+            ingested_at_ns=1_700_000_000_000_000_000,
+            last_changed_ns=1_700_000_000_000_000_000,
+            last_updated_ns=1_700_000_000_000_000_000,
+            context_id=None,
+        ).to_bytes()
+        service = WriterService(
+            table="ha_events",
+            settings=self.settings(delivery_batch_bytes=64),
+            spool_factory=self.open_spool,
+            transport_factory=lambda: ScriptedTransport(),
+        )
+        self.services.append(service)
+        service.start(timeout_seconds=1)
+        with self.assertRaises(WorkerConfigurationError):
+            service._build_batch(
+                ScriptedSpool((self.spool_record(1, oversized),)),
+                isolate_next=False,
+            )
+        service.stop(timeout_seconds=1)
+
+    def test_deliver_once_retries_when_the_batch_cannot_be_built(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        spool = ScriptedSpool(
+            (self.spool_record(1, b"not-json"),),
+            move_error=DeadLetterFullError("dead-letter store is full"),
+        )
+        outcome = asyncio.run(
+            service._deliver_once(
+                spool,
+                ScriptedTransport(),
+                isolate_next=False,
+                backoff=_Backoff(self.settings(), lambda: 0.5),
+            )
+        )
+        self.assertEqual(outcome.kind, "retry")
+        self.assertIsNotNone(outcome.retry_delay)
+        self.assertEqual(service.snapshot().state, WorkerState.RETRY_WAIT)
+        service.stop(timeout_seconds=1)
+
+    def test_deliver_once_retries_when_the_dead_letter_store_is_full(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        spool = ScriptedSpool(
+            (self.spool_record(1, self.event(1).to_bytes()),),
+            move_error=DeadLetterFullError("dead-letter store is full"),
+        )
+        transport = ScriptedTransport(
+            [
+                PermanentIlpError(
+                    "bad row",
+                    retryable=False,
+                    delivery_uncertain=False,
+                    status_code=400,
+                )
+            ]
+        )
+        outcome = asyncio.run(
+            service._deliver_once(
+                spool,
+                transport,
+                isolate_next=False,
+                backoff=_Backoff(self.settings(), lambda: 0.5),
+            )
+        )
+        self.assertEqual(outcome.kind, "retry")
+        self.assertEqual(service.snapshot().state, WorkerState.RETRY_WAIT)
+        service.stop(timeout_seconds=1)
+
+    def test_deliver_once_blocks_on_a_permanent_rejection(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        spool = ScriptedSpool((self.spool_record(1, self.event(1).to_bytes()),))
+        transport = ScriptedTransport(
+            [
+                PermanentIlpError(
+                    "cannot be processed",
+                    retryable=False,
+                    delivery_uncertain=False,
+                    status_code=422,
+                )
+            ]
+        )
+        outcome = asyncio.run(
+            service._deliver_once(
+                spool,
+                transport,
+                isolate_next=False,
+                backoff=_Backoff(self.settings(), lambda: 0.5),
+            )
+        )
+        self.assertEqual(outcome.kind, "blocked")
+        self.assertEqual(service.snapshot().state, WorkerState.BLOCKED)
+        service.stop(timeout_seconds=1)
+
+    def test_deliver_once_propagates_an_unclassified_transport_error(self) -> None:
+        service = self.service(ScriptedTransport())
+        service.start(timeout_seconds=1)
+        spool = ScriptedSpool((self.spool_record(1, self.event(1).to_bytes()),))
+        transport = ScriptedTransport(
+            [
+                IlpTransportError(
+                    "unclassified", retryable=False, delivery_uncertain=False
+                )
+            ]
+        )
+        with self.assertRaises(IlpTransportError):
+            asyncio.run(
+                service._deliver_once(
+                    spool,
+                    transport,
+                    isolate_next=False,
+                    backoff=_Backoff(self.settings(), lambda: 0.5),
+                )
+            )
+        service.stop(timeout_seconds=1)
