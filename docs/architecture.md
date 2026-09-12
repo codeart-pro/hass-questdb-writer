@@ -137,6 +137,16 @@ starting -> running -> retry_wait -> running
 - Any unexpected exception reaches the outer boundary, leaves pending rows in
   SQLite, and produces a visible `failed` snapshot.
 
+While the worker is idle - nothing to persist, nothing to deliver - both loops still
+run: the persist loop polls its wake events with a fixed 50 ms bound
+(`worker.py:671-672`) and reads the spool counters, and the delivery loop reads them
+again whenever it is woken. That idle cost is measured rather than assumed: **~39
+`SQLiteSpool.stats()` calls per second and 1.0-1.7 % of one core** on the
+development host and in the container, with `snapshot()` at 1.7-2.3 us p50. The
+numbers, the environments, the reproduction command and the external review claims
+they settle are in [benchmarks/idle-path.md](benchmarks/idle-path.md); the wake-up
+rate itself is tracked as issue #2.
+
 All capacities, batch thresholds, retry bounds, jitter, latency, and shutdown
 flush behavior are required constructor inputs. Runtime defaults will not be
 selected before production-rate and filesystem tests. The detailed decision is
