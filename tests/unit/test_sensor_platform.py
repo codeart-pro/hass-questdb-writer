@@ -203,6 +203,78 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sensor.available)
 
 
+class TableSizeAvailabilityLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """Silver rule log-when-unavailable: one line per availability transition."""
+
+    logger = "custom_components.hass_questdb_writer.sensor"
+
+    def setUp(self) -> None:
+        self.entry = Mock(
+            entry_id="entry-1",
+            data={
+                "host": "questdb",
+                "port": 9000,
+                "table": "hass",
+                "use_tls": False,
+                "username": None,
+                "password": None,
+            },
+        )
+
+    def sensor(self) -> QuestDbTableSizeSensor:
+        sensor = QuestDbTableSizeSensor(self.entry, "hass")
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
+        )
+        return sensor
+
+    async def test_first_failure_and_recovery_are_logged_once(self) -> None:
+        from custom_components.hass_questdb_writer.transport import (
+            RetryableIlpError,
+        )
+
+        sensor = self.sensor()
+        with patch(
+            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                side_effect=RetryableIlpError(
+                    "connection refused", retryable=True, delivery_uncertain=False
+                )
+            )
+            with self.assertLogs(self.logger, level="WARNING") as logged:
+                await sensor.async_update()
+                await sensor.async_update()
+
+            self.assertFalse(sensor.available)
+            self.assertEqual(len(logged.records), 1)
+            self.assertIn(
+                "connection refused", logged.records[0].getMessage()
+            )
+
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1_000_000]]}
+            )
+            with self.assertLogs(self.logger, level="INFO") as recovered:
+                await sensor.async_update()
+                await sensor.async_update()
+
+        self.assertTrue(sensor.available)
+        self.assertEqual(len(recovered.records), 1)
+        self.assertEqual(sensor.native_value, 1.0)
+
+    async def test_healthy_refreshes_stay_silent(self) -> None:
+        sensor = self.sensor()
+        with patch(
+            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1_000_000]]}
+            )
+            with self.assertNoLogs(self.logger, level="INFO"):
+                await sensor.async_update()
+
+
 class SharedEntityBaseTests(unittest.TestCase):
     """Rule common-modules: the shared entity plumbing lives in entity.py."""
 
@@ -293,6 +365,9 @@ class SensorPollingIntervalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sensor_module.SCAN_INTERVAL, timedelta(seconds=30)
         )
+
+    def test_platform_limits_parallel_updates(self) -> None:
+        self.assertEqual(sensor_module.PARALLEL_UPDATES, 1)
 
     def test_health_sensors_keep_using_the_platform_interval(self) -> None:
         runtime = Mock(snapshot=runtime_snapshot)

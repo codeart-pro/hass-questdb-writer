@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import logging
 import time
 from typing import Any
 
@@ -38,7 +39,15 @@ from .runtime import HassQuestDbRuntime, RuntimeSnapshot
 from .transport import IlpHttpTransport, IlpTransportError
 from .worker import WorkerState
 
+_LOGGER = logging.getLogger(__name__)
+
 _WORKER_STATE_OPTIONS = [state.value for state in WorkerState]
+
+# Home Assistant serialises entity updates and action calls of this platform.
+# Only the table-size sensor does I/O (one HTTP query per refresh) and it has no
+# siblings to queue behind, so one update at a time is the honest bound (rule
+# parallel-updates). 0 would mean "no limit".
+PARALLEL_UPDATES = 1
 
 # Polling model (ADR-0011).
 #
@@ -240,8 +249,24 @@ class QuestDbTableSizeSensor(QuestDbWriterEntity):
             self._attr_native_value = (
                 round(size_bytes / 1_000_000, 1) if size_bytes is not None else None
             )
+            if not self._attr_available:
+                _LOGGER.info(
+                    "QuestDB answered the table size query for %s again",
+                    self._table,
+                )
             self._attr_available = True
-        except IlpTransportError:
+        except IlpTransportError as err:
+            # Log the transition only: the refresh timer runs every
+            # TABLE_SIZE_SCAN_INTERVAL, so repeating the failure would spam the
+            # log for as long as the outage lasts (rule log-when-unavailable).
+            if self._attr_available:
+                _LOGGER.warning(
+                    "QuestDB table size query for %s failed: %s; the sensor "
+                    "reports unavailable and retries in %s",
+                    self._table,
+                    err,
+                    TABLE_SIZE_SCAN_INTERVAL,
+                )
             self._attr_available = False
 
 
