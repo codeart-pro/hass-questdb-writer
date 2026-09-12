@@ -145,30 +145,35 @@ rules:
       manifest.json declares codeowners: ["@codeart"]. Core organisation
       ownership does not apply to a HACS integration.
   log-when-unavailable:
-    status: todo
+    status: done
     comment: >-
-      Not implemented. The table-size sensor flips _attr_available silently; the
-      writer's own retry warnings are rate-limited and do not report the sensor
-      path. Tracked in issue #8.
+      The table-size sensor logs one warning with the transport error when it goes
+      unavailable and one info line when QuestDB answers again, on the transitions
+      only, so a five-minute refresh interval cannot spam the log during an outage.
+      Unit tests cover the single warning, the single recovery line and silence
+      while healthy. Closed issue #8.
   parallel-updates:
-    status: todo
+    status: done
     comment: >-
-      sensor.py defines no PARALLEL_UPDATES. Not urgent while polling entities
-      are read-only and the table-size sensor refreshes from a single timer, but
-      the rule asks for an explicit number.
+      sensor.py declares PARALLEL_UPDATES = 1: only the table-size sensor performs
+      I/O (one HTTP query per refresh) and it has no siblings to queue behind, so
+      one update at a time is the honest bound.
   reauthentication-flow:
-    status: todo
+    status: done
     comment: >-
-      No async_step_reauth. On credential rejection the runtime raises a
-      persistent repair issue (ADR-0010) and points the user at Reconfigure
-      instead of starting a reauthentication flow.
+      async_step_reauth / async_step_reauth_confirm share the connection form and
+      validation with the user and reconfigure steps, and the runtime asks Home
+      Assistant to start the flow once per auth-blocked outage (ADR-0012). Covered
+      by config-flow unit tests, runtime tests and an end-to-end integration test
+      that opens the flow on a real entry and completes it against real QuestDB.
   test-coverage:
-    status: todo
+    status: done
     comment: >-
-      The last audit reported 95% total with worker at 92% and spool at 88%
-      (docs/quality-scale.md); the rule asks for above 95% for every module, so
-      the deep worker/spool branches (dead-letter eviction, WAL recovery,
-      shutdown flush) still need tests.
+      Measured in the dev container with coverage 7.15 (unit + integration,
+      --concurrency=thread): total 99.1%, every module above 95% (lowest:
+      config_flow.py 96.9%, spool.py 98.8%, worker.py 99.1%). The remaining
+      uncovered lines are defensive branches, e.g. worker.py 628
+      ("worker task exited before stop was requested").
 
   # -------------------------------------------------------------------- Gold
   devices:
