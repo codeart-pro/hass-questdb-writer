@@ -131,7 +131,8 @@ benchmarks settle them; they can be left untouched.
 The integration provides five polled sensors (under the device
 **HASS QuestDB Writer**) that read the in-memory writer snapshot — they
 never touch QuestDB, so they keep reporting (and raising alarms) while
-the server is unreachable:
+the server is unreachable. They are polled **every 30 seconds**;
+`homeassistant.update_entity` forces an immediate refresh on demand.
 
 | Entity | Meaning |
 |---|---|
@@ -140,7 +141,7 @@ the server is unreachable:
 | `pending_rows_in_spool` | undelivered rows buffered in SQLite |
 | `events_delivered` | total events delivered (total_increasing) |
 | `last_delivery_error` | text of the last delivery error, `none` when clean |
-| `table_size_on_disk` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB**, goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
+| `table_size_on_disk` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB every 5 minutes** by its own timer (not the 30 s health poll), goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
 
 Because the SQL integration's sensors freeze on their last value while
 QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`

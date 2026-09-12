@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.components.sensor import SensorDeviceClass
 
+from custom_components.hass_questdb_writer import sensor as sensor_module
 from custom_components.hass_questdb_writer.sensor import (
     QuestDbHealthSensor,
     QuestDbTableSizeSensor,
@@ -197,6 +199,98 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             )
             await sensor.async_update()
         self.assertFalse(sensor.available)
+
+
+class SensorPollingIntervalTests(unittest.IsolatedAsyncioTestCase):
+    """ADR-0011: explicit platform interval, own timer for the table size."""
+
+    def setUp(self) -> None:
+        self.entry = Mock(
+            entry_id="entry-1",
+            data={
+                "host": "questdb",
+                "port": 9000,
+                "table": "hass",
+                "use_tls": False,
+                "username": None,
+                "password": None,
+            },
+        )
+
+    def table_size_sensor(self) -> QuestDbTableSizeSensor:
+        sensor = QuestDbTableSizeSensor(self.entry, "hass")
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
+        )
+        return sensor
+
+    def test_platform_declares_an_explicit_scan_interval(self) -> None:
+        self.assertEqual(
+            sensor_module.SCAN_INTERVAL, timedelta(seconds=30)
+        )
+
+    def test_health_sensors_keep_using_the_platform_interval(self) -> None:
+        runtime = Mock(snapshot=runtime_snapshot)
+        sensor = QuestDbHealthSensor(runtime, self.entry, _sensor_specs()[0])
+        self.assertTrue(sensor.should_poll)
+
+    def test_table_size_sensor_leaves_platform_polling(self) -> None:
+        self.assertFalse(self.table_size_sensor().should_poll)
+        self.assertEqual(
+            sensor_module.TABLE_SIZE_SCAN_INTERVAL, timedelta(minutes=5)
+        )
+
+    async def test_table_size_sensor_measures_once_and_starts_its_timer(
+        self,
+    ) -> None:
+        sensor = self.table_size_sensor()
+        unsub = Mock()
+        with (
+            patch.object(
+                QuestDbTableSizeSensor, "async_update", AsyncMock()
+            ) as update,
+            patch(
+                "custom_components.hass_questdb_writer.sensor.async_track_time_interval",
+                return_value=unsub,
+            ) as track,
+        ):
+            await sensor.async_added_to_hass()
+
+        update.assert_awaited_once()
+        track.assert_called_once_with(
+            sensor.hass,
+            sensor._async_refresh,
+            timedelta(minutes=5),
+            name="hass_questdb_writer table size",
+        )
+        self.assertIs(sensor._unsub_timer, unsub)
+
+    async def test_timer_callback_refreshes_and_writes_the_state(self) -> None:
+        sensor = self.table_size_sensor()
+        with (
+            patch.object(
+                QuestDbTableSizeSensor, "async_update", AsyncMock()
+            ) as update,
+            patch.object(
+                QuestDbTableSizeSensor, "async_write_ha_state"
+            ) as write_state,
+        ):
+            await sensor._async_refresh(
+                datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc)
+            )
+
+        update.assert_awaited_once()
+        write_state.assert_called_once_with()
+
+    async def test_removal_cancels_the_timer(self) -> None:
+        sensor = self.table_size_sensor()
+        unsub = Mock()
+        sensor._unsub_timer = unsub
+
+        await sensor.async_will_remove_from_hass()
+
+        unsub.assert_called_once_with()
+        self.assertIsNone(sensor._unsub_timer)
 
 
 if __name__ == "__main__":

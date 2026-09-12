@@ -365,6 +365,17 @@ Diagnostics expose at least:
 Logs are structured around state transitions and are rate-limited during long
 outages. Per-event success logging is disabled outside targeted debugging.
 
+### Sensor polling
+
+The five health sensors are polling entities that read the in-memory runtime
+snapshot (no I/O) at the platform interval declared in `sensor.py`
+(`SCAN_INTERVAL = 30 s`). The table-size sensor queries QuestDB over HTTP, so it
+opts out of the platform poll (`should_poll = False`) and owns a 5-minute
+`async_track_time_interval` timer, cancelled on removal. Both intervals are
+explicit because Home Assistant otherwise inherits the sensor-domain default and
+because the quality-scale rule *appropriate-polling* requires a stated interval
+(ADR-0011).
+
 ## Development environment
 
 The local podman stack (QuestDB, Home Assistant, Grafana, dashboards) lives
