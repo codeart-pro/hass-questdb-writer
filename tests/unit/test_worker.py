@@ -685,6 +685,10 @@ class WriterServiceTests(unittest.TestCase):
         service.start(timeout_seconds=1)
         service.submit(self.event(1))
         self.wait_for(lambda: service.snapshot().state is WorkerState.FAILED)
+        # The snapshot flips to FAILED inside the thread's own cleanup, so the
+        # thread is still unwinding at that point; wait for it to really exit
+        # instead of racing it (#7).
+        self.wait_for(lambda: not service.snapshot().thread_alive)
         snapshot = service.snapshot()
         self.assertFalse(snapshot.thread_alive)
         self.assertIn("unexpected", snapshot.last_error or "")

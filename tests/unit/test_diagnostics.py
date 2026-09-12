@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+import json
+from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -118,9 +120,17 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.hass, self.entry
             )
         self.assertEqual(result["domain"], "hass_questdb_writer")
-        self.assertEqual(
-            result["versions"]["integration"], "0.1.0-dev0"
+        # Compare against the manifest instead of a literal: the version is bumped
+        # on every release, and a hard-coded copy silently goes stale (#6).
+        manifest = json.loads(
+            (
+                Path(__file__).parents[2]
+                / "custom_components"
+                / "hass_questdb_writer"
+                / "manifest.json"
+            ).read_text()
         )
+        self.assertEqual(result["versions"]["integration"], manifest["version"])
         from homeassistant.const import __version__ as HA_VERSION
 
         self.assertEqual(result["versions"]["home_assistant"], HA_VERSION)
