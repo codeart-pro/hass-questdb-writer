@@ -173,6 +173,22 @@ class ScriptedSpool:
         """Nothing to release: the double owns no resources."""
 
 
+def _running_in_persist_loop() -> bool:
+    """True when the caller runs inside the writer service's persist loop.
+
+    `spool.stats()` is called from three places: startup (`_run`, before any event
+    loop exists), the persist loop and the delivery loop. Only the persist loop
+    clears the wake event, so a regression test for that clear/drain ordering has to
+    target it exactly.
+    """
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:  # startup call: no running event loop
+        return False
+    coroutine = task.get_coro() if task is not None else None
+    return getattr(coroutine, "__qualname__", "") == "WriterService._persist_loop"
+
+
 class WriterServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -194,6 +210,7 @@ class WriterServiceTests(unittest.TestCase):
             "delivery_batch_rows": 3,
             "delivery_batch_bytes": 64_000,
             "flush_interval_seconds": 0.02,
+            "persist_idle_poll_seconds": 0.05,
             "retry_initial_seconds": 0.05,
             "retry_max_seconds": 0.1,
             "retry_multiplier": 2,
@@ -695,19 +712,76 @@ class WriterServiceTests(unittest.TestCase):
         with self.open_spool() as spool:
             self.assertEqual(spool.stats().pending_rows, 1)
 
+    def test_a_submit_during_persistence_is_not_lost(self) -> None:
+        """A submit() landing inside a persist-loop iteration is persisted at once.
+
+        This pins the invariant that makes a long poll bound safe (ADR 0013): the wake
+        signal is not lost even though the loop clears `_wake_persist` after its drain,
+        because `submit()` signals through `call_soon_threadsafe` and the loop does not
+        yield in between. Only the persist loop clears that event, so the proxy submits
+        from inside `stats()` while the persist loop is running (the startup call in
+        `_run` and the delivery loop's calls are excluded), and the fallback bound is
+        deliberately a whole second: a lost signal would leave the event unpersisted
+        for that second, far outside the 0.5 s window asserted here. The measured
+        latency for this path is ~1 ms.
+        """
+        holder: list[WriterService] = []
+        accepted: list[bool] = []
+        late_event = self.event(99)
+
+        class SubmitDuringStats:
+            """Spool proxy that submits one event from the worker thread."""
+
+            def __init__(self, inner: SQLiteSpool) -> None:
+                self._inner = inner
+                self._submitted = False
+
+            def stats(self) -> SpoolStats:
+                stats = self._inner.stats()
+                if not self._submitted and _running_in_persist_loop():
+                    self._submitted = True
+                    accepted.append(holder[0].submit(late_event))
+                return stats
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._inner, name)
+
+        service = WriterService(
+            table="ha_events",
+            settings=self.settings(persist_idle_poll_seconds=1.0),
+            # Built on the worker thread: SQLite connections are thread-bound.
+            spool_factory=lambda: SubmitDuringStats(self.open_spool()),  # type: ignore[arg-type]
+            transport_factory=lambda: ScriptedTransport(),
+        )
+        self.services.append(service)
+        holder.append(service)
+        service.start(timeout_seconds=1)
+        self.wait_for(
+            lambda: service.snapshot().persisted_events >= 1, timeout=0.5
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(accepted, [True])
+        self.assertEqual(snapshot.persisted_events, 1)
+        service.stop(timeout_seconds=1)
+
     def test_settings_rejects_invalid_values(self) -> None:
-        invalid = {
-            "persist_batch_rows": 0,
-            "persist_batch_rows": "x",
-            "flush_interval_seconds": -1,
-            "flush_interval_seconds": float("nan"),
-            "retry_initial_seconds": 0,
-            "retry_max_seconds": 0.01,
-            "retry_multiplier": 0.5,
-            "retry_jitter_ratio": 2,
-            "flush_on_shutdown": "yes",
-        }
-        for field, value in invalid.items():
+        # A tuple list, not a dict: duplicate keys in a dict literal are silently
+        # dropped, which would hide cases such as integer 0 next to "0".
+        invalid = [
+            ("persist_batch_rows", 0),
+            ("persist_batch_rows", "x"),
+            ("flush_interval_seconds", -1),
+            ("flush_interval_seconds", float("nan")),
+            ("persist_idle_poll_seconds", 0),
+            ("persist_idle_poll_seconds", float("nan")),
+            ("persist_idle_poll_seconds", "x"),
+            ("retry_initial_seconds", 0),
+            ("retry_max_seconds", 0.01),
+            ("retry_multiplier", 0.5),
+            ("retry_jitter_ratio", 2),
+            ("flush_on_shutdown", "yes"),
+        ]
+        for field, value in invalid:
             with self.subTest(field=field, value=value):
                 with self.assertRaises(ValueError):
                     self.settings(**{field: value})  # type: ignore[arg-type]

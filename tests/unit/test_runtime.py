@@ -170,6 +170,7 @@ class HassQuestDbRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 delivery_batch_rows=10,
                 delivery_batch_bytes=100_000,
                 flush_interval_seconds=0.1,
+                persist_idle_poll_seconds=0.05,
                 retry_initial_seconds=0.1,
                 retry_max_seconds=1,
                 retry_multiplier=2,
