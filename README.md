@@ -1,6 +1,6 @@
 # HASS QuestDB Writer
 
-[![Validate](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml)
+[![Validate](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml) [![Release](https://img.shields.io/github/v/release/codeart-pro/hass-questdb-writer?sort=semver)](https://github.com/codeart-pro/hass-questdb-writer/releases)
 
 Stream every Home Assistant state change into
 [QuestDB](https://questdb.com/) — durable, at-least-once, with server-side
