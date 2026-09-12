@@ -66,6 +66,7 @@
           "delivery_batch_rows": "Delivery batch size (rows)",
           "delivery_batch_bytes": "Delivery batch size (bytes)",
           "flush_interval_seconds": "Flush interval (seconds)",
+          "persist_idle_poll_seconds": "Persist idle poll fallback (seconds)",
           "retry_initial_seconds": "Initial retry delay (seconds)",
           "retry_max_seconds": "Maximum retry delay (seconds)",
           "retry_multiplier": "Retry delay multiplier",

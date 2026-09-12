@@ -46,11 +46,19 @@ _MEASURED_MODULES = ("const", "ilp", "event", "spool", "transport", "schema", "w
 
 
 def load_component() -> tuple[Any, Any]:
-    """Import the component's Home-Assistant-free modules under a synthetic package."""
+    """Import the component's Home-Assistant-free modules under a synthetic package.
+
+    Modules already pulled in by a relative import are reused instead of executed
+    again: `event` imports `spool`, so re-executing `spool` would register a second
+    module object and its classes would stop matching the ones `event` captured
+    (an `isinstance` check inside the spool then fails for perfectly valid events).
+    """
     package = types.ModuleType("hqw")
     package.__path__ = [str(COMPONENT)]
     sys.modules["hqw"] = package
     for name in _MEASURED_MODULES:
+        if f"hqw.{name}" in sys.modules:
+            continue
         spec = importlib.util.spec_from_file_location(
             f"hqw.{name}", COMPONENT / f"{name}.py"
         )
@@ -133,6 +141,7 @@ def run(
     repeats: int,
     snapshot_calls: int,
     flush_interval_seconds: float,
+    persist_idle_poll_seconds: float,
 ) -> dict[str, object]:
     spool_module, worker_module = load_component()
     SQLiteSpool = spool_module.SQLiteSpool
@@ -167,6 +176,7 @@ def run(
         delivery_batch_rows=1_000,
         delivery_batch_bytes=512 * 1024,
         flush_interval_seconds=flush_interval_seconds,
+        persist_idle_poll_seconds=persist_idle_poll_seconds,
         retry_initial_seconds=1.0,
         retry_max_seconds=60.0,
         retry_multiplier=2.0,
@@ -198,6 +208,7 @@ def run(
             "python": platform.python_version(),
             "platform": f"{platform.system()}-{platform.machine()}",
             "flush_interval_seconds": flush_interval_seconds,
+            "persist_idle_poll_seconds": persist_idle_poll_seconds,
         },
         "idle_windows": windows,
         "snapshot": {
@@ -215,6 +226,12 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--snapshot-calls", type=int, default=20_000)
     parser.add_argument("--flush-interval-seconds", type=float, default=1.0)
+    parser.add_argument(
+        "--persist-idle-poll-seconds",
+        type=float,
+        default=1.0,
+        help="persist-loop fallback bound; pass 0.05 to reproduce the pre-0.1.3 behaviour",
+    )
     args = parser.parse_args()
 
     result = run(
@@ -222,6 +239,7 @@ def main() -> None:
         repeats=args.repeats,
         snapshot_calls=args.snapshot_calls,
         flush_interval_seconds=args.flush_interval_seconds,
+        persist_idle_poll_seconds=args.persist_idle_poll_seconds,
     )
     print(json.dumps(result, indent=2))
 

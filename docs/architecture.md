@@ -137,15 +137,16 @@ starting -> running -> retry_wait -> running
 - Any unexpected exception reaches the outer boundary, leaves pending rows in
   SQLite, and produces a visible `failed` snapshot.
 
-While the worker is idle - nothing to persist, nothing to deliver - both loops still
-run: the persist loop polls its wake events with a fixed 50 ms bound
-(`worker.py:671-672`) and reads the spool counters, and the delivery loop reads them
-again whenever it is woken. That idle cost is measured rather than assumed: **~39
-`SQLiteSpool.stats()` calls per second and 1.0-1.7 % of one core** on the
-development host and in the container, with `snapshot()` at 1.7-2.3 us p50. The
-numbers, the environments, the reproduction command and the external review claims
-they settle are in [benchmarks/idle-path.md](benchmarks/idle-path.md); the wake-up
-rate itself is tracked as issue #2.
+While the worker is idle - nothing to persist, nothing to deliver - the delivery
+loop keeps reading the spool counters at the flush-interval cadence, and the persist
+loop wakes at its fallback bound. That idle cost is measured rather than assumed:
+**~2 `SQLiteSpool.stats()` calls per second and 0.04-0.12 % of one core**, down from
+~39 calls and 1.0-1.7 % before [ADR 0013](decisions/0013-idle-persist-polling.md)
+replaced a hard-coded 50 ms poll with the explicit, validated
+`persist_idle_poll_seconds` fallback. `snapshot()` costs 1.7-2.4 us p50, so the
+health sensors reading it every 30 s are free. The numbers, the environments, the
+reproduction command and the external review claims they settle are in
+[benchmarks/idle-path.md](benchmarks/idle-path.md).
 
 All capacities, batch thresholds, retry bounds, jitter, latency, and shutdown
 flush behavior are required constructor inputs. Runtime defaults will not be

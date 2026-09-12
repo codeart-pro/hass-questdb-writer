@@ -135,6 +135,7 @@ benchmarks settle them; they can be left untouched.
 | **Delivery batch rows** | `1000` | 1–100000 | events per ILP batch |
 | **Delivery batch bytes** | `524288` (512 KiB) | 4096–16777216 | bytes per ILP batch (whichever limit hits first) |
 | **Flush interval (s)** | `1.0` | 0.05–300 | spool → delivery cadence at low event rates |
+| **Persist idle poll fallback (s)** | `1.0` | 0.05–60 | lost-wakeup fallback of the persist loop, not a latency bound: a new event is persisted as soon as `submit()` signals the worker, so this only bounds the recovery time if that signal was dropped ([ADR 0013](docs/decisions/0013-idle-persist-polling.md)). Raising it lowers the idle wake-up rate |
 | **Retry initial (s)** | `1.0` | 0.1–300 | first backoff delay after a failed delivery |
 | **Retry max (s)** | `60` | 1–3600 | backoff ceiling |
 | **Retry multiplier** | `2.0` | 1–10 | exponential backoff factor |

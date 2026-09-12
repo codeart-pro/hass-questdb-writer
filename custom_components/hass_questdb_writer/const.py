@@ -25,6 +25,7 @@ CONF_PERSIST_BATCH_ROWS = "persist_batch_rows"
 CONF_DELIVERY_BATCH_ROWS = "delivery_batch_rows"
 CONF_DELIVERY_BATCH_BYTES = "delivery_batch_bytes"
 CONF_FLUSH_INTERVAL_SECONDS = "flush_interval_seconds"
+CONF_PERSIST_IDLE_POLL_SECONDS = "persist_idle_poll_seconds"
 CONF_RETRY_INITIAL_SECONDS = "retry_initial_seconds"
 CONF_RETRY_MAX_SECONDS = "retry_max_seconds"
 CONF_RETRY_MULTIPLIER = "retry_multiplier"
@@ -51,6 +52,10 @@ PROVISIONAL_PERSIST_BATCH_ROWS = 100
 PROVISIONAL_DELIVERY_BATCH_ROWS = 1_000
 PROVISIONAL_DELIVERY_BATCH_BYTES = 512 * 1_024
 PROVISIONAL_FLUSH_INTERVAL_SECONDS = 1.0
+# Lost-wakeup fallback for the persist loop, not a latency bound (ADR 0013): a new
+# event is persisted as soon as submit() signals the loop; this only bounds the
+# recovery time if that signal was dropped.
+PROVISIONAL_PERSIST_IDLE_POLL_SECONDS = 1.0
 PROVISIONAL_RETRY_INITIAL_SECONDS = 1.0
 PROVISIONAL_RETRY_MAX_SECONDS = 60.0
 PROVISIONAL_RETRY_MULTIPLIER = 2.0

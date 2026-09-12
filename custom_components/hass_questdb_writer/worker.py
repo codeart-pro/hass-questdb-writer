@@ -142,6 +142,7 @@ class WorkerSettings:
     delivery_batch_rows: int
     delivery_batch_bytes: int
     flush_interval_seconds: float
+    persist_idle_poll_seconds: float
     retry_initial_seconds: float
     retry_max_seconds: float
     retry_multiplier: float
@@ -161,6 +162,7 @@ class WorkerSettings:
                 raise ValueError(f"{name} must be a positive integer")
         for name in (
             "flush_interval_seconds",
+            "persist_idle_poll_seconds",
             "retry_initial_seconds",
             "retry_max_seconds",
             "retry_multiplier",
@@ -175,6 +177,8 @@ class WorkerSettings:
                 raise ValueError(f"{name} must be finite")
         if self.flush_interval_seconds <= 0:
             raise ValueError("flush_interval_seconds must be positive")
+        if self.persist_idle_poll_seconds <= 0:
+            raise ValueError("persist_idle_poll_seconds must be positive")
         if self.retry_initial_seconds <= 0:
             raise ValueError("retry_initial_seconds must be positive")
         if self.retry_max_seconds < self.retry_initial_seconds:
@@ -667,9 +671,17 @@ class WriterService:
                     )
                 await asyncio.sleep(0)
                 continue
+            # Clearing here cannot lose a submit(): `submit` signals through
+            # `call_soon_threadsafe`, whose callback only runs when this coroutine
+            # yields - and this coroutine does not yield between the drain above and
+            # the wait below. Measured with a 1 s bound: a submit landing inside this
+            # iteration is persisted in ~1 ms (ADR 0013, which also records the
+            # refuted "lost wakeup" hypothesis). The bound is therefore a recovery
+            # fallback for a dropped signal, not a latency parameter.
             self._wake_persist.clear()
             await self._wait_events(
-                [self._wake_persist, self._stop_async], 0.05
+                [self._wake_persist, self._stop_async],
+                self._settings.persist_idle_poll_seconds,
             )
 
     def _count_dead_letter_move(self, moved: int, evicted: int) -> None:

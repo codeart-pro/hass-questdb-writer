@@ -38,6 +38,7 @@ from .const import (
     CONF_MAX_SERIALIZED_EVENT_BYTES,
     CONF_PASSWORD,
     CONF_PERSIST_BATCH_ROWS,
+    CONF_PERSIST_IDLE_POLL_SECONDS,
     CONF_PORT,
     CONF_RETENTION_DAYS,
     CONF_RETRY_INITIAL_SECONDS,
@@ -64,6 +65,7 @@ from .const import (
     PROVISIONAL_MAX_PENDING_ROWS,
     PROVISIONAL_MAX_SERIALIZED_EVENT_BYTES,
     PROVISIONAL_PERSIST_BATCH_ROWS,
+    PROVISIONAL_PERSIST_IDLE_POLL_SECONDS,
     PROVISIONAL_RETRY_INITIAL_SECONDS,
     PROVISIONAL_RETRY_JITTER_RATIO,
     PROVISIONAL_RETRY_MAX_SECONDS,
@@ -168,6 +170,10 @@ def _runtime_configuration(
             flush_interval_seconds=options.get(
                 CONF_FLUSH_INTERVAL_SECONDS,
                 PROVISIONAL_FLUSH_INTERVAL_SECONDS,
+            ),
+            persist_idle_poll_seconds=options.get(
+                CONF_PERSIST_IDLE_POLL_SECONDS,
+                PROVISIONAL_PERSIST_IDLE_POLL_SECONDS,
             ),
             retry_initial_seconds=options.get(
                 CONF_RETRY_INITIAL_SECONDS,
