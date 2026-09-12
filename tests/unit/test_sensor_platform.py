@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.hass_questdb_writer import sensor as sensor_module
+from custom_components.hass_questdb_writer.entity import QuestDbWriterEntity
 from custom_components.hass_questdb_writer.sensor import (
     HealthSensorSpec,
     QuestDbHealthSensor,
@@ -200,6 +201,35 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             )
             await sensor.async_update()
         self.assertFalse(sensor.available)
+
+
+class SharedEntityBaseTests(unittest.TestCase):
+    """Rule common-modules: the shared entity plumbing lives in entity.py."""
+
+    def setUp(self) -> None:
+        self.entry = Mock(entry_id="entry-1", data={})
+        self.runtime = Mock(snapshot=runtime_snapshot)
+
+    def test_sensors_derive_from_the_base_entity(self) -> None:
+        self.assertTrue(issubclass(QuestDbHealthSensor, QuestDbWriterEntity))
+        self.assertTrue(issubclass(QuestDbTableSizeSensor, QuestDbWriterEntity))
+        self.assertEqual(
+            QuestDbWriterEntity.__module__,
+            "custom_components.hass_questdb_writer.entity",
+        )
+
+    def test_both_entities_report_the_same_device(self) -> None:
+        health = QuestDbHealthSensor(
+            self.runtime, self.entry, _sensor_specs()[0]
+        )
+        table = QuestDbTableSizeSensor(self.entry, "hass")
+        self.assertEqual(health.device_info, table.device_info)
+        self.assertEqual(health.device_info["name"], "HASS QuestDB Writer")
+        self.assertEqual(
+            health.device_info["identifiers"], {("hass_questdb_writer", "entry-1")}
+        )
+        self.assertEqual(health.unique_id, "entry-1-state")
+        self.assertEqual(table.unique_id, "entry-1-table_size")
 
 
 class SensorNamingTests(unittest.IsolatedAsyncioTestCase):

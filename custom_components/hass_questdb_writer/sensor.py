@@ -11,20 +11,16 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import json
-from pathlib import Path
 import time
 from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
-    SensorEntity,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTime
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -35,16 +31,12 @@ from .const import (
     CONF_TABLE,
     CONF_USE_TLS,
     CONF_USERNAME,
-    DOMAIN,
     PROVISIONAL_HTTP_TIMEOUT_SECONDS,
 )
+from .entity import QuestDbWriterEntity
 from .runtime import HassQuestDbRuntime, RuntimeSnapshot
 from .transport import IlpHttpTransport, IlpTransportError
 from .worker import WorkerState
-
-_MANIFEST = json.loads(
-    (Path(__file__).parent / "manifest.json").read_text(encoding="utf-8")
-)
 
 _WORKER_STATE_OPTIONS = [state.value for state in WorkerState]
 
@@ -144,12 +136,8 @@ def _sensor_specs() -> tuple[HealthSensorSpec, ...]:
     )
 
 
-class QuestDbHealthSensor(SensorEntity):
+class QuestDbHealthSensor(QuestDbWriterEntity):
     """A polled sensor reading one value from the runtime snapshot."""
-
-    # The name describes the entity only; HA prefixes the device name (Bronze
-    # rule has-entity-name).
-    _attr_has_entity_name = True
 
     # Platform interval is the module-level SCAN_INTERVAL (ADR-0011).
     _attr_should_poll = True
@@ -160,28 +148,21 @@ class QuestDbHealthSensor(SensorEntity):
         entry: ConfigEntry,
         spec: HealthSensorSpec,
     ) -> None:
+        super().__init__(entry, spec.key, spec.name)
         self._runtime = runtime
         self._spec = spec
-        self._attr_unique_id = f"{entry.entry_id}-{spec.key}"
-        self._attr_name = spec.name
         self._attr_icon = spec.icon
         self._attr_device_class = spec.device_class
         self._attr_state_class = spec.state_class
         self._attr_native_unit_of_measurement = spec.native_unit
         self._attr_options = spec.options
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="HASS QuestDB Writer",
-            manufacturer="HASS QuestDB Writer",
-            sw_version=_MANIFEST["version"],
-        )
 
     async def async_update(self) -> None:
         """Refresh this sensor from the in-memory snapshot (no I/O)."""
         self._attr_native_value = self._spec.extractor(self._runtime.snapshot())
 
 
-class QuestDbTableSizeSensor(SensorEntity):
+class QuestDbTableSizeSensor(QuestDbWriterEntity):
     """On-disk size of the entry's table, queried from QuestDB.
 
     Unlike the memory-backed health sensors this one talks to QuestDB:
@@ -194,16 +175,14 @@ class QuestDbTableSizeSensor(SensorEntity):
     2,880 requests per day for a value that only grows.
     """
 
-    _attr_has_entity_name = True
     _attr_should_poll = False
 
     def __init__(self, entry: ConfigEntry, table_name: str) -> None:
+        super().__init__(entry, "table_size", "Table size")
         self._entry_data = entry.data
         self._table = table_name
         self._transport: IlpHttpTransport | None = None
         self._unsub_timer: CALLBACK_TYPE | None = None
-        self._attr_unique_id = f"{entry.entry_id}-table_size"
-        self._attr_name = "Table size"
         self._attr_icon = "mdi:database-outline"
         # No device_class on purpose: DATA_SIZE has a unit converter in
         # HA which would rewrite the state into the registry unit (B),
@@ -211,12 +190,6 @@ class QuestDbTableSizeSensor(SensorEntity):
         # exactly as reported.
         self._attr_device_class = None
         self._attr_native_unit_of_measurement = "MB"
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name="HASS QuestDB Writer",
-            manufacturer="HASS QuestDB Writer",
-            sw_version=_MANIFEST["version"],
-        )
 
     async def async_added_to_hass(self) -> None:
         """Take the first measurement and start the refresh timer.
