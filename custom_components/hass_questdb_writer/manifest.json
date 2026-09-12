@@ -4,9 +4,10 @@
   "codeowners": ["@codeart-pro"],
   "config_flow": true,
   "documentation": "https://github.com/codeart-pro/hass-questdb-writer",
+  "issue_tracker": "https://github.com/codeart-pro/hass-questdb-writer/issues",
   "integration_type": "service",
   "iot_class": "local_push",
   "platforms": ["sensor"],
   "requirements": [],
-  "version": "0.1.1"
+  "version": "0.1.2"
 }
