@@ -2,6 +2,10 @@
 
 Status: accepted.
 
+Partially superseded by [ADR 0012](0012-reauthentication-flow.md): a rejected
+credential set now also starts a reauthentication flow. The repair issue described
+here stays as the persistent, visible record of the outage.
+
 Date: 2026-08-29
 
 ## Context

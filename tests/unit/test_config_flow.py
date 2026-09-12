@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, Mock, patch
 import unittest
 
-from homeassistant.config_entries import SOURCE_RECONFIGURE
+from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_RECONFIGURE
 
 from custom_components.hass_questdb_writer.config_flow import (
     HassQuestDbWriterConfigFlow,
@@ -309,6 +309,145 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["errors"], {"base": "invalid_auth"})
+
+
+class ReauthFlowTests(unittest.IsolatedAsyncioTestCase):
+    """Silver rule reauthentication-flow (ADR-0012)."""
+
+    def _reauth_flow(self, entry_data: dict) -> HassQuestDbWriterConfigFlow:
+        entry = Mock(data=entry_data)
+        flow = HassQuestDbWriterConfigFlow()
+        flow.context = {"source": SOURCE_REAUTH, "entry_id": "entry-1"}
+        flow.hass = Mock(
+            config_entries=Mock(
+                async_get_known_entry=Mock(return_value=entry)
+            )
+        )
+        return flow
+
+    def stored_entry_data(self) -> dict:
+        return {
+            CONF_HOST: "questdb",
+            CONF_PORT: 9000,
+            CONF_TABLE: "events",
+            CONF_USE_TLS: False,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "secret",
+        }
+
+    async def test_reauth_prefills_connection_and_hides_password(self) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        result = await flow.async_step_reauth({})
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["step_id"], "reauth_confirm")
+        defaults = result["data_schema"]({})
+        self.assertEqual(defaults[CONF_HOST], "questdb")
+        self.assertEqual(defaults[CONF_PORT], 9000)
+        self.assertEqual(defaults[CONF_USERNAME], "admin")
+        self.assertEqual(defaults[CONF_PASSWORD], "")
+
+    async def test_reauth_keeps_stored_secret_when_password_is_empty(
+        self,
+    ) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        update = Mock(return_value={"type": "abort", "reason": "reauth_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            result = await flow.async_step_reauth_confirm(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertEqual(result["reason"], "reauth_successful")
+        update.assert_called_once()
+        self.assertEqual(update.call_args[0][0].data[CONF_PASSWORD], "secret")
+        self.assertEqual(update.call_args.kwargs["data"][CONF_PASSWORD], "secret")
+        self.assertEqual(
+            update.call_args.kwargs["reason"], "reauth_successful"
+        )
+
+    async def test_reauth_stores_new_credentials(self) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        update = Mock(return_value={"type": "abort"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()) as test,
+        ):
+            await flow.async_step_reauth_confirm(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "new-secret",
+                }
+            )
+        test.assert_awaited_once()
+        self.assertEqual(
+            update.call_args.kwargs["data"][CONF_PASSWORD], "new-secret"
+        )
+
+    async def test_reauth_reports_rejected_credentials(self) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        with (
+            patch.object(flow, "async_update_reload_and_abort", Mock()),
+            patch.object(
+                flow,
+                "_test_connection",
+                AsyncMock(
+                    side_effect=AuthenticationIlpError(
+                        "rejected", retryable=False, delivery_uncertain=False
+                    )
+                ),
+            ),
+        ):
+            result = await flow.async_step_reauth_confirm(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "wrong",
+                }
+            )
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["step_id"], "reauth_confirm")
+        self.assertEqual(result["errors"], {"base": "invalid_auth"})
+
+    async def test_reauth_reports_unreachable_host(self) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        with (
+            patch.object(flow, "async_update_reload_and_abort", Mock()),
+            patch.object(
+                flow,
+                "_test_connection",
+                AsyncMock(
+                    side_effect=IlpTransportError(
+                        "down", retryable=True, delivery_uncertain=False
+                    )
+                ),
+            ),
+        ):
+            result = await flow.async_step_reauth_confirm(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "secret",
+                }
+            )
+        self.assertEqual(result["errors"], {"base": "cannot_connect"})
 
 
 class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):

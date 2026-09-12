@@ -14,7 +14,12 @@ import urllib.parse
 import urllib.request
 
 from homeassistant import bootstrap, loader
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState, SOURCE_USER
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryState,
+    SOURCE_REAUTH,
+    SOURCE_USER,
+)
 from homeassistant.core import HomeAssistant
 
 from custom_components.hass_questdb_writer.const import (
@@ -168,6 +173,56 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # designated timestamp and dedup upsert keys.
         columns = self.sql(f"SHOW COLUMNS FROM {self.table}")
         validate_table_columns(columns["dataset"], self.table)
+
+    async def test_reauth_flow_repairs_the_entry(self) -> None:
+        """Rule reauthentication-flow: the entry can open and finish a reauth flow."""
+        form = await self.hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await self.hass.config_entries.flow.async_configure(
+            form["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: self.table,
+                CONF_USE_TLS: False,
+            },
+        )
+        entry = result["result"]
+        self.addAsyncCleanup(self._unload_entry, entry)
+        await self.hass.async_block_till_done()
+        self.assertEqual(entry.state, ConfigEntryState.LOADED)
+
+        # This is the request the runtime makes when the worker reports an auth
+        # block (ADR-0012); starting it directly exercises the same wiring.
+        entry.async_start_reauth(self.hass)
+        await self.hass.async_block_till_done()
+
+        active = list(entry.async_get_active_flows(self.hass, {SOURCE_REAUTH}))
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["handler"], DOMAIN)
+        self.assertEqual(active[0]["step_id"], "reauth_confirm")
+
+        # Completing the flow validates the credentials against real QuestDB,
+        # stores them and reloads the entry.
+        finished = await self.hass.config_entries.flow.async_configure(
+            active[0]["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: self.table,
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "",
+                CONF_PASSWORD: "",
+            },
+        )
+        self.assertEqual(finished["type"], "abort")
+        self.assertEqual(finished["reason"], "reauth_successful")
+        await self.hass.async_block_till_done()
+        self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        self.assertEqual(
+            list(entry.async_get_active_flows(self.hass, {SOURCE_REAUTH})), []
+        )
 
     async def test_config_flow_setup_reload_event_and_unload(self) -> None:
         form = await self.hass.config_entries.flow.async_init(

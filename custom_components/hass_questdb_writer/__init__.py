@@ -216,6 +216,11 @@ async def async_setup_entry(
         hass,
         _runtime_configuration(hass, entry),
         entry_id=entry.entry_id,
+        # QuestDB rejecting the stored credentials is offered for repair through
+        # the reauthentication flow (ADR-0012); the runtime only asks once per
+        # outage and Home Assistant skips the request when a reauth or
+        # reconfigure flow is already running.
+        request_reauth=lambda: entry.async_start_reauth(hass),
     )
     try:
         await runtime.async_start()

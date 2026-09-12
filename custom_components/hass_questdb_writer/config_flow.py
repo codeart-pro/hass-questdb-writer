@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import ssl
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.config_entries import SOURCE_RECONFIGURE
+from homeassistant.config_entries import SOURCE_REAUTH, SOURCE_RECONFIGURE
 from homeassistant.const import (
     CONF_DOMAINS,
     CONF_ENTITIES,
@@ -402,49 +403,73 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.hass.async_add_executor_job(transport.exec_query, "select 1")
 
     def _reject(
-        self, user_input: dict[str, Any], error: str
+        self, step_id: str, user_input: dict[str, Any], error: str
     ) -> config_entries.ConfigFlowResult:
         return self.async_show_form(
-            step_id="user",
+            step_id=step_id,
             data_schema=_user_schema(user_input),
             errors={"base": error},
         )
-
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> config_entries.ConfigFlowResult:
-        """Handle reconfiguration of an existing entry."""
-        return await self.async_step_user(user_input)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Handle the initial configuration step."""
-        reconfigure_entry: config_entries.ConfigEntry | None = None
+        return await self._async_connection_step("user", user_input)
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle reconfiguration of an existing entry."""
+        return await self._async_connection_step("user", user_input)
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> config_entries.ConfigFlowResult:
+        """Handle reauthentication after QuestDB rejected the credentials.
+
+        Home Assistant starts this flow when the writer reports an
+        authentication block (ADR-0012).
+        """
+        return await self._async_connection_step("reauth_confirm", None)
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Validate and store the credentials entered during reauthentication."""
+        return await self._async_connection_step("reauth_confirm", user_input)
+
+    async def _async_connection_step(
+        self, step_id: str, user_input: dict[str, Any] | None
+    ) -> config_entries.ConfigFlowResult:
+        """Connection form and validation shared by user, reconfigure and reauth."""
+        source_entry: config_entries.ConfigEntry | None = None
         if self.source == SOURCE_RECONFIGURE:
-            reconfigure_entry = self._get_reconfigure_entry()
+            source_entry = self._get_reconfigure_entry()
+        elif self.source == SOURCE_REAUTH:
+            source_entry = self._get_reauth_entry()
         if user_input is not None:
             host = user_input[CONF_HOST].strip()
             table = user_input[CONF_TABLE].strip()
             username = (user_input.get(CONF_USERNAME) or "").strip() or None
             password = user_input.get(CONF_PASSWORD) or None
-            if reconfigure_entry is not None:
+            if source_entry is not None:
                 # Empty credentials keep the stored ones, so the secret is
                 # never exposed in the form.
-                existing = reconfigure_entry.data
+                existing = source_entry.data
                 if username is None and existing.get(CONF_USERNAME):
                     username = existing[CONF_USERNAME]
                 if password is None and existing.get(CONF_PASSWORD):
                     password = existing[CONF_PASSWORD]
             if not host or not table or len(table.encode("utf-8")) > 127:
                 return self.async_show_form(
-                    step_id="user",
+                    step_id=step_id,
                     data_schema=_user_schema(user_input),
                     errors={"base": "invalid_connection"},
                 )
             if bool(username) != bool(password):
                 return self.async_show_form(
-                    step_id="user",
+                    step_id=step_id,
                     data_schema=_user_schema(user_input),
                     errors={"base": "invalid_auth_pair"},
                 )
@@ -458,12 +483,18 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             try:
                 await self._test_connection(new_data)
             except AuthenticationIlpError:
-                return self._reject(user_input, "invalid_auth")
+                return self._reject(step_id, user_input, "invalid_auth")
             except IlpTransportError:
-                return self._reject(user_input, "cannot_connect")
-            if reconfigure_entry is not None:
+                return self._reject(step_id, user_input, "cannot_connect")
+            if source_entry is not None:
+                if self.source == SOURCE_REAUTH:
+                    return self.async_update_reload_and_abort(
+                        source_entry,
+                        data=new_data,
+                        reason="reauth_successful",
+                    )
                 return self.async_update_reload_and_abort(
-                    reconfigure_entry,
+                    source_entry,
                     data=new_data,
                 )
             scheme = "https" if user_input[CONF_USE_TLS] else "http"
@@ -477,11 +508,13 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         defaults = (
-            {**reconfigure_entry.data, CONF_PASSWORD: ""}
-            if reconfigure_entry is not None
+            {**source_entry.data, CONF_PASSWORD: ""}
+            if source_entry is not None
             else {}
         )
-        return self.async_show_form(step_id="user", data_schema=_user_schema(defaults))
+        return self.async_show_form(
+            step_id=step_id, data_schema=_user_schema(defaults)
+        )
 
     @staticmethod
     def async_get_options_flow(
