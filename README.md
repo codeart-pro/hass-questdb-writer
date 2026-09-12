@@ -59,6 +59,29 @@ Copy `custom_components/hass_questdb_writer/` into your Home Assistant
 The connection parameters can be changed later via the **Reconfigure**
 action; filtering and tuning options live in **Configure**.
 
+## Removal
+
+1. **Delete the config entry**: Settings → Devices & Services → **HASS QuestDB
+   Writer** → ⋯ → **Delete**. Home Assistant unloads the entry first: the
+   state-change listener is removed, the writer stops (events already accepted are
+   persisted to the spool before it joins) and the table-size timer is cancelled.
+   The sensors and the device disappear from the UI.
+2. **Remove the integration code**: in HACS → **HASS QuestDB Writer** → ⋯ →
+   **Remove**, or delete `custom_components/hass_questdb_writer/` by hand, then
+   restart Home Assistant.
+3. **Clean up what stays behind**:
+   - **QuestDB**: the integration creates and owns its table but never drops it,
+     so the history stays until you delete it yourself:
+
+     ```sql
+     DROP TABLE hass;   -- the table name from your configuration
+     ```
+
+   - **The local spool file**: `/config/.storage/hass_questdb_writer/<entry_id>.db`
+     is the SQLite spool, including events that were never delivered. Deleting the
+     config entry does not delete it — remove the file by hand once you are sure
+     you do not need its contents.
+
 ## Options
 
 Everything is configured in the UI — no YAML. There are three surfaces:
