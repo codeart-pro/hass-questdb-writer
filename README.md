@@ -1,5 +1,7 @@
 # HASS QuestDB Writer
 
+[![Validate](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml)
+
 Stream every Home Assistant state change into
 [QuestDB](https://questdb.com/) — durable, at-least-once, with server-side
 deduplication.
