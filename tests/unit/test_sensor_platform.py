@@ -11,6 +11,7 @@ from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.hass_questdb_writer import sensor as sensor_module
 from custom_components.hass_questdb_writer.sensor import (
+    HealthSensorSpec,
     QuestDbHealthSensor,
     QuestDbTableSizeSensor,
     _sensor_specs,
@@ -199,6 +200,40 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             )
             await sensor.async_update()
         self.assertFalse(sensor.available)
+
+
+class SensorNamingTests(unittest.IsolatedAsyncioTestCase):
+    """Bronze rule has-entity-name: labels describe the entity, not the device."""
+
+    def setUp(self) -> None:
+        self.runtime = Mock(snapshot=runtime_snapshot)
+        self.entry = Mock(entry_id="entry-1", data={})
+
+    def health_sensor(self, spec: HealthSensorSpec) -> QuestDbHealthSensor:
+        return QuestDbHealthSensor(self.runtime, self.entry, spec)
+
+    def test_health_sensor_labels_are_device_relative(self) -> None:
+        expected = {
+            "state": "State",
+            "last_success_age": "Seconds since last delivery",
+            "pending_rows": "Pending rows",
+            "delivered_events": "Events delivered",
+            "last_error": "Last delivery error",
+        }
+        names: dict[str, str | None] = {}
+        for spec in _sensor_specs():
+            sensor = self.health_sensor(spec)
+            self.assertTrue(sensor.has_entity_name, spec.key)
+            label = (sensor.name or "").lower()
+            self.assertNotIn("writer", label)
+            self.assertNotIn("questdb", label)
+            names[spec.key] = sensor.name
+        self.assertEqual(names, expected)
+
+    def test_table_size_label_is_device_relative(self) -> None:
+        sensor = QuestDbTableSizeSensor(self.entry, "hass")
+        self.assertTrue(sensor.has_entity_name)
+        self.assertEqual(sensor.name, "Table size")
 
 
 class SensorPollingIntervalTests(unittest.IsolatedAsyncioTestCase):

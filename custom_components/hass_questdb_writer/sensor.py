@@ -87,10 +87,13 @@ def _last_success_age(snapshot: RuntimeSnapshot) -> float | None:
 
 
 def _sensor_specs() -> tuple[HealthSensorSpec, ...]:
+    # Names read as fields of the writer device: with `has_entity_name` the
+    # device name ("HASS QuestDB Writer") is prefixed by Home Assistant, so the
+    # labels here must not repeat it.
     return (
         HealthSensorSpec(
             key="state",
-            name="Writer state",
+            name="State",
             icon="mdi:database-check-outline",
             device_class=SensorDeviceClass.ENUM,
             state_class=None,
@@ -110,7 +113,7 @@ def _sensor_specs() -> tuple[HealthSensorSpec, ...]:
         ),
         HealthSensorSpec(
             key="pending_rows",
-            name="Pending rows in spool",
+            name="Pending rows",
             icon="mdi:tray-arrow-down",
             device_class=None,
             state_class=SensorStateClass.MEASUREMENT,
@@ -143,6 +146,10 @@ def _sensor_specs() -> tuple[HealthSensorSpec, ...]:
 
 class QuestDbHealthSensor(SensorEntity):
     """A polled sensor reading one value from the runtime snapshot."""
+
+    # The name describes the entity only; HA prefixes the device name (Bronze
+    # rule has-entity-name).
+    _attr_has_entity_name = True
 
     # Platform interval is the module-level SCAN_INTERVAL (ADR-0011).
     _attr_should_poll = True
@@ -187,6 +194,7 @@ class QuestDbTableSizeSensor(SensorEntity):
     2,880 requests per day for a value that only grows.
     """
 
+    _attr_has_entity_name = True
     _attr_should_poll = False
 
     def __init__(self, entry: ConfigEntry, table_name: str) -> None:
@@ -195,7 +203,7 @@ class QuestDbTableSizeSensor(SensorEntity):
         self._transport: IlpHttpTransport | None = None
         self._unsub_timer: CALLBACK_TYPE | None = None
         self._attr_unique_id = f"{entry.entry_id}-table_size"
-        self._attr_name = "Table size on disk"
+        self._attr_name = "Table size"
         self._attr_icon = "mdi:database-outline"
         # No device_class on purpose: DATA_SIZE has a unit converter in
         # HA which would rewrite the state into the registry unit (B),

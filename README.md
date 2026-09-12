@@ -134,14 +134,19 @@ never touch QuestDB, so they keep reporting (and raising alarms) while
 the server is unreachable. They are polled **every 30 seconds**;
 `homeassistant.update_entity` forces an immediate refresh on demand.
 
+Entity labels read as fields of the device, so Home Assistant shows them as
+**HASS QuestDB Writer State**, **HASS QuestDB Writer Table size**, and so on. The
+entity IDs below are what a **fresh install** gets; entities registered by an
+earlier version keep the ID they already have (only their friendly name changes).
+
 | Entity | Meaning |
 |---|---|
-| `writer_state` | worker state: `new`/`starting`/`running`/`retry_wait`/`blocked`/`stopping`/`stopped`/`failed` |
+| `state` | worker state: `new`/`starting`/`running`/`retry_wait`/`blocked`/`stopping`/`stopped`/`failed` |
 | `seconds_since_last_delivery` | age of the last successful delivery (s) — **grows during an outage** |
-| `pending_rows_in_spool` | undelivered rows buffered in SQLite |
+| `pending_rows` | undelivered rows buffered in SQLite |
 | `events_delivered` | total events delivered (total_increasing) |
 | `last_delivery_error` | text of the last delivery error, `none` when clean |
-| `table_size_on_disk` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB every 5 minutes** by its own timer (not the 30 s health poll), goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
+| `table_size` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB every 5 minutes** by its own timer (not the 30 s health poll), goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
 
 Because the SQL integration's sensors freeze on their last value while
 QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`
