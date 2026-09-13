@@ -1,0 +1,112 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Deliberately no `schedule`: the "latest" matrix entry below can go red because Home
+# Assistant released something, not because this repository changed. The README badge
+# shows the workflow status of the default branch, so a nightly canary run would flip
+# it without a code change. If such a canary is wanted later, it belongs in its own
+# workflow with its own badge.
+
+permissions: {}
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit tests (HA ${{ matrix.label }})
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The version hacs.json declares as the minimum. Nothing else checks that
+          # promise: the development stack runs a much newer Home Assistant.
+          - label: "2025.1.0 (declared minimum)"
+            spec: "homeassistant==2025.1.0"
+            python: "3.12"
+          # Current stable, so a Home Assistant release that breaks an API used here
+          # is noticed the same day.
+          - label: "latest"
+            spec: "homeassistant"
+            python: "3.13"
+    steps:
+      - name: Checkout
+        uses: "actions/checkout@v4"
+      - name: Set up Python ${{ matrix.python }}
+        uses: "actions/setup-python@v5"
+        with:
+          python-version: "${{ matrix.python }}"
+          cache: "pip"
+          cache-dependency-path: ".github/workflows/tests.yml"
+      - name: Install Home Assistant and pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "${{ matrix.spec }}" pytest
+      # `python -m pytest`, not `pytest`: the module form puts the working directory on
+      # sys.path, which is what makes `custom_components` importable. The bare console
+      # script fails collection with 12 errors.
+      - name: Run unit tests
+        run: python -m pytest tests/unit -q
+
+  integration:
+    name: Integration tests (HA ${{ matrix.label }})
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "2025.1.0 (declared minimum)"
+            spec: "homeassistant==2025.1.0"
+            python: "3.12"
+          - label: "latest"
+            spec: "homeassistant"
+            python: "3.13"
+    # The integration tests boot a real Home Assistant and write to a real QuestDB
+    # (create/read/drop their own tables), so the job needs a live database.
+    services:
+      questdb:
+        image: "questdb/questdb:10.0.1"
+        ports:
+          - "9000:9000"
+    env:
+      # The tests read these two variables and default to `questdb`, which only
+      # resolves inside a container network. A job on a runner reaches the service
+      # container through its published port instead.
+      QUESTDB_HTTP_HOST: "127.0.0.1"
+      QUESTDB_HTTP_PORT: "9000"
+    steps:
+      - name: Checkout
+        uses: "actions/checkout@v4"
+      - name: Set up Python ${{ matrix.python }}
+        uses: "actions/setup-python@v5"
+        with:
+          python-version: "${{ matrix.python }}"
+          cache: "pip"
+          cache-dependency-path: ".github/workflows/tests.yml"
+      - name: Install Home Assistant and pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "${{ matrix.spec }}" pytest
+      # Wait in the job rather than through a container health check: the QuestDB image
+      # does not promise a shell or curl inside it.
+      - name: Wait for QuestDB
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:9000/exec?query=select%201" >/dev/null; then
+              echo "QuestDB answered after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "QuestDB did not become ready within 60 s" >&2
+          exit 1
+      - name: Run integration tests
+        run: python -m pytest tests/integration -q
