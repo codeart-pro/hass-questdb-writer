@@ -76,6 +76,8 @@
           "max_pending_bytes": "Spool capacity (bytes)",
           "max_dead_letter_rows": "Dead-letter capacity (rows)",
           "max_dead_letter_bytes": "Dead-letter capacity (bytes)",
+          "spool_min_free_bytes": "Minimum free disk space (bytes)",
+          "spool_min_free_ratio": "Minimum free disk space (share of the filesystem)",
           "retention_days": "Data retention (days, 0 = no limit)",
           "sqlite_busy_timeout_seconds": "SQLite busy timeout (seconds)",
           "http_timeout_seconds": "HTTP timeout (seconds)",

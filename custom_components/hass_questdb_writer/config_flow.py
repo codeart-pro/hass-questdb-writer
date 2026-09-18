@@ -57,6 +57,8 @@ from .const import (
     CONF_RETRY_MULTIPLIER,
     CONF_SHOW_ADVANCED,
     CONF_SQLITE_BUSY_TIMEOUT_SECONDS,
+    CONF_SPOOL_MIN_FREE_BYTES,
+    CONF_SPOOL_MIN_FREE_RATIO,
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
@@ -84,6 +86,8 @@ from .const import (
     PROVISIONAL_RETRY_MAX_SECONDS,
     PROVISIONAL_RETRY_MULTIPLIER,
     PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS,
+    PROVISIONAL_SPOOL_MIN_FREE_BYTES,
+    PROVISIONAL_SPOOL_MIN_FREE_RATIO,
     PROVISIONAL_START_TIMEOUT_SECONDS,
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
@@ -345,6 +349,18 @@ def _advanced_schema(options: dict[str, Any]) -> vol.Schema:
                 CONF_MAX_DEAD_LETTER_BYTES,
                 default=get(CONF_MAX_DEAD_LETTER_BYTES, PROVISIONAL_MAX_DEAD_LETTER_BYTES),
             ): _number(65_536, 268_435_456, 65_536),
+            vol.Optional(
+                CONF_SPOOL_MIN_FREE_BYTES,
+                default=get(
+                    CONF_SPOOL_MIN_FREE_BYTES, PROVISIONAL_SPOOL_MIN_FREE_BYTES
+                ),
+            ): _number(0, 1_073_741_824, 1_048_576),
+            vol.Optional(
+                CONF_SPOOL_MIN_FREE_RATIO,
+                default=get(
+                    CONF_SPOOL_MIN_FREE_RATIO, PROVISIONAL_SPOOL_MIN_FREE_RATIO
+                ),
+            ): _number(0, 0.5, 0.01),
             vol.Optional(
                 CONF_RETENTION_DAYS,
                 default=str(get(CONF_RETENTION_DAYS, 0)),

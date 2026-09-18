@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 from os import PathLike
+from pathlib import Path
 import sqlite3
 from types import TracebackType
 from typing import Final, Self
@@ -36,6 +37,23 @@ class SpoolFullError(SpoolError):
     """The pending queue has reached an explicit row or payload-byte limit."""
 
 
+class SpoolStorageError(SpoolError):
+    """The storage layer failed in a way that can clear on its own.
+
+    Separate from generic :class:`SpoolError` because the worker reacts to it by
+    blocking and retrying rather than by giving up: the events are still safe,
+    only the place to put them is temporarily unusable.
+    """
+
+
+class SpoolDiskFullError(SpoolStorageError):
+    """SQLite reported ``SQLITE_FULL``: the database or its filesystem is full."""
+
+
+class SpoolReadOnlyError(SpoolStorageError):
+    """SQLite reported a read-only database or filesystem."""
+
+
 class DeadLetterFullError(SpoolError):
     """The dead-letter store has reached an explicit capacity limit."""
 
@@ -46,6 +64,40 @@ class EventTooLargeError(SpoolError):
 
 class BatchLimitTooSmallError(SpoolError):
     """The oldest event cannot fit in an otherwise empty batch."""
+
+
+# SQLITE_READONLY covers the plain read-only case; the extended codes are what
+# SQLite reports when the filesystem or the database file changed underneath an
+# open connection - all of them mean "this storage cannot be written now".
+_READ_ONLY_SQLITE_CODES: Final = frozenset(
+    code
+    for code in (
+        getattr(sqlite3, "SQLITE_READONLY", None),
+        getattr(sqlite3, "SQLITE_READONLY_RECOVERY", None),
+        getattr(sqlite3, "SQLITE_READONLY_CANTLOCK", None),
+        getattr(sqlite3, "SQLITE_READONLY_ROLLBACK", None),
+        getattr(sqlite3, "SQLITE_READONLY_DBMOVED", None),
+        getattr(sqlite3, "SQLITE_READONLY_CANTINIT", None),
+        getattr(sqlite3, "SQLITE_READONLY_DIRECTORY", None),
+    )
+    if code is not None
+)
+
+
+def classify_storage_error(exc: sqlite3.Error, message: str) -> SpoolError:
+    """Map a SQLite failure onto the spool error the worker reacts to.
+
+    Only the two conditions a retry can clear are classified; everything else
+    stays a plain :class:`SpoolError`, which the worker treats as fatal. Manually
+    constructed ``sqlite3.Error`` instances carry no ``sqlite_errorcode``, so
+    they fall through to the generic branch.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None and code == getattr(sqlite3, "SQLITE_FULL", None):
+        return SpoolDiskFullError(f"{message}: database or disk is full")
+    if code in _READ_ONLY_SQLITE_CODES:
+        return SpoolReadOnlyError(f"{message}: database or filesystem is read-only")
+    return SpoolError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +306,7 @@ class SQLiteSpool:
         self._max_dead_letter_bytes = _positive_integer(
             "max_dead_letter_bytes", max_dead_letter_bytes
         )
+        self._path = Path(path)
         if self._max_event_bytes > self._max_pending_bytes:
             raise ValueError("max_event_bytes must not exceed max_pending_bytes")
         if self._max_event_bytes > self._max_dead_letter_bytes:
@@ -297,6 +350,11 @@ class SQLiteSpool:
         except sqlite3.Error as exc:
             self.close()
             raise SpoolError("failed to initialize SQLite spool") from exc
+
+    @property
+    def path(self) -> Path:
+        """The database file this spool owns."""
+        return self._path
 
     @property
     def _db(self) -> sqlite3.Connection:
@@ -520,7 +578,7 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to enqueue events") from exc
+            raise classify_storage_error(exc, "failed to enqueue events") from exc
         return len(new_events)
 
     def peek_batch(
@@ -581,7 +639,7 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to mark events delivered") from exc
+            raise classify_storage_error(exc, "failed to mark events delivered") from exc
         return len(sequence_values)
 
     def record_attempt(
@@ -618,7 +676,7 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to record delivery attempt") from exc
+            raise classify_storage_error(exc, "failed to record delivery attempt") from exc
         return len(sequence_values)
 
     def move_to_dead_letter(
@@ -747,7 +805,9 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to move events to dead letter") from exc
+            raise classify_storage_error(
+                exc, "failed to move events to dead letter"
+            ) from exc
         return moved, evicted
 
     def peek_dead_letters(self, *, limit: int) -> tuple[DeadLetterRecord, ...]:

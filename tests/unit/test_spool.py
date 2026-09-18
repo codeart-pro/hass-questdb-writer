@@ -18,10 +18,13 @@ from custom_components.hass_questdb_writer.spool import (
     NewSpoolEvent,
     SQLiteSpool,
     SpoolClosedError,
+    SpoolDiskFullError,
     SpoolError,
     SpoolFullError,
+    SpoolReadOnlyError,
     SpoolStateError,
     UnsupportedSpoolVersionError,
+    classify_storage_error,
 )
 
 
@@ -42,6 +45,37 @@ class SQLiteSpoolTests(unittest.TestCase):
         }
         options.update(overrides)
         return SQLiteSpool(self.path, **options)
+
+    def test_enqueue_reports_a_full_database_as_a_storage_error(self) -> None:
+        # SQLITE_FULL without filling the disk: a small page limit plus a payload
+        # too large for the WAL makes SQLite refuse the write (a few kilobytes
+        # still fit in the WAL and never touch the capped database file).
+        with self.open_spool(
+            max_pending_bytes=200_000,
+            max_event_bytes=100_000,
+            max_dead_letter_bytes=200_000,
+        ) as spool:
+            spool._db.execute("PRAGMA max_page_count = 8")
+            with self.assertRaises(SpoolDiskFullError) as caught:
+                spool.enqueue_many((NewSpoolEvent("event-1", b"x" * 60_000, 1),))
+            self.assertIsInstance(caught.exception, SpoolError)
+            self.assertIn("database or disk is full", str(caught.exception))
+            cause = caught.exception.__cause__
+            self.assertEqual(getattr(cause, "sqlite_errorcode", None), 13)
+
+    def test_enqueue_reports_a_read_only_database_as_a_storage_error(self) -> None:
+        with self.open_spool() as spool:
+            spool._db.execute("PRAGMA query_only = ON")
+            with self.assertRaises(SpoolReadOnlyError) as caught:
+                spool.enqueue_many((NewSpoolEvent("event-1", b"payload", 1),))
+            self.assertIn("read-only", str(caught.exception))
+
+    def test_unclassified_sqlite_errors_stay_generic(self) -> None:
+        # Only conditions a retry can clear are classified: anything else must
+        # stay fatal rather than looping forever.
+        error = classify_storage_error(sqlite3.Error("disk I/O error"), "failed")
+        self.assertIs(type(error), SpoolError)
+        self.assertNotIsInstance(error, (SpoolDiskFullError, SpoolReadOnlyError))
 
     def test_enqueue_many_preserves_order_and_is_idempotent(self) -> None:
         events = (

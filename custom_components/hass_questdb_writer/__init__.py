@@ -47,6 +47,8 @@ from .const import (
     CONF_RETRY_MAX_SECONDS,
     CONF_RETRY_MULTIPLIER,
     CONF_SQLITE_BUSY_TIMEOUT_SECONDS,
+    CONF_SPOOL_MIN_FREE_BYTES,
+    CONF_SPOOL_MIN_FREE_RATIO,
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
@@ -72,6 +74,8 @@ from .const import (
     PROVISIONAL_RETRY_MAX_SECONDS,
     PROVISIONAL_RETRY_MULTIPLIER,
     PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS,
+    PROVISIONAL_SPOOL_MIN_FREE_BYTES,
+    PROVISIONAL_SPOOL_MIN_FREE_RATIO,
     PROVISIONAL_START_TIMEOUT_SECONDS,
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
@@ -193,6 +197,12 @@ def _runtime_configuration(
             ),
             flush_on_shutdown=options.get(
                 CONF_FLUSH_ON_SHUTDOWN, PROVISIONAL_FLUSH_ON_SHUTDOWN
+            ),
+            min_free_bytes=options.get(
+                CONF_SPOOL_MIN_FREE_BYTES, PROVISIONAL_SPOOL_MIN_FREE_BYTES
+            ),
+            min_free_ratio=options.get(
+                CONF_SPOOL_MIN_FREE_RATIO, PROVISIONAL_SPOOL_MIN_FREE_RATIO
             ),
         ),
         start_timeout_seconds=options.get(

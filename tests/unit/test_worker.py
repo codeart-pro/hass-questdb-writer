@@ -18,11 +18,17 @@ from custom_components.hass_questdb_writer.schema import SchemaMismatchError
 from custom_components.hass_questdb_writer.spool import (
     DeadLetterFullError,
     NewSpoolEvent,
+    SpoolDiskFullError,
     SpoolError,
     SpoolFullError,
+    SpoolReadOnlyError,
     SQLiteSpool,
     SpoolRecord,
     SpoolStats,
+)
+from custom_components.hass_questdb_writer.storage_guard import (
+    FilesystemGuard,
+    StorageUsage,
 )
 from custom_components.hass_questdb_writer.transport import (
     AuthenticationIlpError,
@@ -189,6 +195,58 @@ def _running_in_persist_loop() -> bool:
     return getattr(coroutine, "__qualname__", "") == "WriterService._persist_loop"
 
 
+class StorageFailureScript:
+    """Failure state shared between the test thread and the worker's spool."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.error = error
+        self.enqueue_calls = 0
+        self.enqueue_failures = 0
+
+
+class StorageFailureSpool:
+    """Spool double whose durable write fails while the script says so.
+
+    The inner spool is created on the calling thread, so the factory must build
+    it: SQLite connections are thread-affine and the worker opens its spool from
+    the worker thread.
+    """
+
+    def __init__(self, inner: SQLiteSpool, script: StorageFailureScript) -> None:
+        self._inner = inner
+        self._script = script
+
+    @property
+    def path(self) -> Path:
+        return self._inner.path
+
+    def enqueue_many(self, events: tuple[NewSpoolEvent, ...]) -> int:
+        self._script.enqueue_calls += 1
+        error = self._script.error
+        if error is not None:
+            self._script.enqueue_failures += 1
+            raise error
+        return self._inner.enqueue_many(events)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+class MutableFilesystem:
+    """A fake filesystem whose free space the test controls."""
+
+    def __init__(self, *, total_bytes: int, free_bytes: int) -> None:
+        self.total_bytes = total_bytes
+        self.free_bytes = free_bytes
+        self.checks = 0
+
+    def usage(self, path: Path) -> StorageUsage:
+        self.checks += 1
+        return StorageUsage(
+            total_bytes=self.total_bytes, free_bytes=self.free_bytes
+        )
+
+
 class WriterServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -252,6 +310,7 @@ class WriterServiceTests(unittest.TestCase):
         settings: WorkerSettings | None = None,
         spool_factory: Callable[[], object] | None = None,
         schema_factory: Callable[[], ScriptedSchema] | None = None,
+        filesystem_guard: FilesystemGuard | None = None,
     ) -> WriterService:
         service = WriterService(
             table="ha_events",
@@ -260,6 +319,7 @@ class WriterServiceTests(unittest.TestCase):
             transport_factory=lambda: transport,
             schema_factory=schema_factory,
             random_source=lambda: 0.5,
+            filesystem_guard=filesystem_guard,
         )
         self.services.append(service)
         return service
@@ -972,6 +1032,7 @@ class WriterServiceTests(unittest.TestCase):
         service.start(timeout_seconds=1)
         service.submit(self.event(1))
         self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        self.assertEqual(service.snapshot().block_reason, "spool_full")
         self.assertIn(
             "pending rows limit reached", service.snapshot().last_error or ""
         )
@@ -979,6 +1040,128 @@ class WriterServiceTests(unittest.TestCase):
         service.stop(timeout_seconds=0.05)
         self.wait_for(lambda: service.snapshot().state is WorkerState.FAILED)
         self.assertIn("unpersisted", service.snapshot().last_error or "")
+
+    def test_disk_full_pauses_persistence_instead_of_failing(self) -> None:
+        script = StorageFailureScript(
+            SpoolDiskFullError("failed to enqueue events: database or disk is full")
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        blocked = service.snapshot()
+        self.assertEqual(blocked.block_reason, "disk_full")
+        self.assertEqual(blocked.storage_blocks, 1)
+        self.assertTrue(blocked.thread_alive)
+        self.assertEqual(blocked.held_unpersisted, 1)
+
+        # The filesystem recovers: the very same batch must go through.
+        script.error = None
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        recovered = service.snapshot()
+        self.assertEqual(recovered.storage_recoveries, 1)
+        self.assertIsNone(recovered.block_reason)
+        service.stop(timeout_seconds=1)
+
+    def test_read_only_database_pauses_persistence_instead_of_failing(
+        self,
+    ) -> None:
+        script = StorageFailureScript(
+            SpoolReadOnlyError(
+                "failed to enqueue events: database or filesystem is read-only"
+            )
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        self.assertEqual(service.snapshot().block_reason, "readonly")
+        self.assertTrue(service.snapshot().thread_alive)
+
+        script.error = None
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        self.assertEqual(service.snapshot().storage_recoveries, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_low_free_space_blocks_before_any_durable_write(self) -> None:
+        script = StorageFailureScript()
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        blocked = service.snapshot()
+        self.assertEqual(blocked.block_reason, "disk_space")
+        self.assertEqual(blocked.storage_blocks, 1)
+        self.assertEqual(blocked.disk_free_bytes, 500)
+        self.assertEqual(blocked.disk_reserve_bytes, 100_000)
+        self.assertIn("below the 100000 byte reserve", blocked.last_error or "")
+        # The guard must stop the write, not discover the problem through it.
+        self.assertEqual(script.enqueue_calls, 0)
+
+        filesystem.free_bytes = 10_000_000
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        self.assertEqual(service.snapshot().storage_recoveries, 1)
+        self.assertGreaterEqual(script.enqueue_calls, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_storage_block_keeps_every_accepted_event_until_stop(self) -> None:
+        script = StorageFailureScript(
+            SpoolDiskFullError("database or disk is full")
+        )
+        service = self.service(
+            ScriptedTransport(),
+            settings=self.settings(ingress_queue_capacity=2),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+        )
+        service.start(timeout_seconds=1)
+        for index in range(5):
+            service.submit(self.event(index))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        snapshot = service.snapshot()
+        # Nothing is lost silently: while persistence is paused every event is
+        # either waiting in memory or was dropped at the ingress queue and
+        # counted there.
+        self.assertEqual(snapshot.persisted_events, 0)
+        self.assertEqual(
+            snapshot.held_unpersisted
+            + snapshot.ingress_queue_depth
+            + snapshot.overflowed_events,
+            5,
+        )
+        service.stop(timeout_seconds=0.05)
 
     def test_signal_loop_ignores_a_closed_loop(self) -> None:
         service = self.service(ScriptedTransport())
