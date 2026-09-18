@@ -92,10 +92,12 @@ only converts them to ILP when constructing a delivery batch. Consequently, a
 serialization or ILP-encoding failure can be retained in dead-letter state
 instead of disappearing before durable persistence.
 
-If the ingress queue cannot accept an event, the runtime records an explicit
-overflow metric and follows the configured overflow policy. Silent loss is not
-allowed. Exact queue limits and the default overflow policy remain open until
-load tests establish safe values.
+If the ingress queue cannot accept an event, the runtime records it in
+`overflowed_events`. Silent loss is not allowed. Since
+[ADR 0014](decisions/0014-spool-pressure-policy.md) the overflow policy is
+explicit: events that were accepted are persisted before newer ones are
+considered, a full queue drops newest-first, and the queue limits stay
+configurable with provisional defaults until load tests establish safe values.
 
 ### Writer service
 
@@ -171,9 +173,13 @@ separate dead-letter table.
 
 Pending and dead-letter stores both have explicit row and payload-byte
 limits. The limits do not pretend to include SQLite page, index, WAL, or
-metadata overhead, so the integration also needs a filesystem free-space guard
-before production release. Reaching the pending limit must be visible through
-logs and diagnostics and invoke an explicit policy. The dead-letter store is a
+metadata overhead, so a filesystem free-space guard bounds what the writer
+itself may consume: the reserve is
+`max(spool_min_free_bytes, spool_min_free_ratio * filesystem size)` and it is
+checked before every durable write
+([ADR 0014](decisions/0014-spool-pressure-policy.md)). Reaching the pending
+limit is visible through logs and diagnostics and pauses persistence instead of
+the worker. The dead-letter store is a
 bounded ring buffer: when a move would exceed its limits, the oldest rows are
 evicted first and the evictions are counted and logged, never silent. The
 project will not advertise unlimited outage retention. See
@@ -263,9 +269,19 @@ flowing.
 
 ### Spool full or unwritable
 
-The runtime enters a degraded state, emits a rate-limited error, increments a
-loss/overflow counter, and applies the configured overflow policy. This case is
-covered by explicit disk-full and permission tests.
+Persistence pauses; the worker keeps running. The state becomes `BLOCKED` with
+a `block_reason` of `spool_full`, `disk_space`, `disk_full` or `readonly`, a
+rate-limited warning explains it, and `storage_blocks` counts the pauses.
+Accepted events stay in the ingress queue, so the condition itself loses
+nothing; once that queue is full, new events are dropped and counted in
+`overflowed_events`, exactly as for any other ingress overflow. The first
+durable write that succeeds after the condition clears returns the state to
+`RUNNING` and counts a recovery in `storage_recoveries`. Diagnostics also
+report `disk_free_bytes` and `disk_reserve_bytes`, which separates a QuestDB
+outage (pending backlog grows) from a storage problem (blocks grow while free
+space sits at the reserve). Explicit tests reproduce `SQLITE_FULL` and
+`SQLITE_READONLY` on the spool's own connection, without filling a disk. See
+[ADR 0014](decisions/0014-spool-pressure-policy.md).
 
 ### Worker crash
 
@@ -433,7 +449,9 @@ The following require evidence before implementation defaults are frozen:
 - HTTP versus TCP performance for the measured production event rate;
 - table partitioning and WAL settings;
 - full attributes versus an allow-list;
-- overflow policy under a prolonged full-disk outage;
+- overflow policy under a prolonged full-disk outage: the policy is decided in
+  [ADR 0014](decisions/0014-spool-pressure-policy.md), but the free-space
+  reserve defaults still need production measurements;
 - automatic worker restart policy;
 - whether dead-letter events need a separate QuestDB table or only local
   diagnostics.
