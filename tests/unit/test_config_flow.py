@@ -22,8 +22,11 @@ from custom_components.hass_questdb_writer.const import (
     CONF_EXCLUDE,
     CONF_FLUSH_ON_SHUTDOWN,
     CONF_HOST,
+    CONF_HTTP_TIMEOUT_SECONDS,
     CONF_INCLUDE,
+    CONF_INGRESS_QUEUE_CAPACITY,
     CONF_MAX_DEAD_LETTER_BYTES,
+    CONF_MAX_PENDING_ROWS,
     CONF_MAX_SERIALIZED_EVENT_BYTES,
     CONF_PASSWORD,
     CONF_PORT,
@@ -533,6 +536,29 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
             result["data"][CONF_ATTRIBUTE_DENYLIST],
             ["rssi", "linkquality"],
         )
+
+    async def test_init_step_keeps_stored_advanced_options(self) -> None:
+        # Editing filters alone must not silently reset the tuning knobs that
+        # the advanced step wrote earlier: both live in entry.options.
+        stored = {
+            CONF_DELIVERY_BATCH_ROWS: 7,
+            CONF_FLUSH_ON_SHUTDOWN: True,
+            CONF_HTTP_TIMEOUT_SECONDS: 9.5,
+            CONF_INGRESS_QUEUE_CAPACITY: 5_000,
+            CONF_MAX_PENDING_ROWS: 12_345,
+            CONF_RETENTION_DAYS: 30,
+        }
+        flow = self.flow(stored)
+        result = await self._init(flow, self.filter_input())
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["data"][CONF_INCLUDE]["entities"], ["sensor.kitchen"]
+        )
+        for key, value in stored.items():
+            self.assertEqual(
+                result["data"].get(key), value, f"{key} was dropped"
+            )
+        self.assertNotIn(CONF_SHOW_ADVANCED, result["data"])
 
     async def test_init_step_carries_filter_into_advanced_step(self) -> None:
         flow = self.flow()

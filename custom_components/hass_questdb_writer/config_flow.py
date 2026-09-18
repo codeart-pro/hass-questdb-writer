@@ -609,7 +609,13 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                     step_id="advanced",
                     data_schema=_advanced_schema(self._entry.options),
                 )
-            return self.async_create_entry(title="", data=self._filter_options)
+            # One options flow owns entry.options as a whole, so a filter-only
+            # edit must carry every value the advanced step stored earlier;
+            # writing the filter keys alone would reset the tuning knobs to the
+            # PROVISIONAL_* defaults on the next reload.
+            return self.async_create_entry(
+                title="", data={**self._entry.options, **self._filter_options}
+            )
         domain_options = await _domain_selector_options(self.hass)
         return self.async_show_form(
             step_id="init",
@@ -641,7 +647,7 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 )
             return self.async_create_entry(
                 title="",
-                data={**self._filter_options, **values},
+                data={**self._entry.options, **self._filter_options, **values},
             )
         return self.async_show_form(
             step_id="advanced",
