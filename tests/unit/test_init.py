@@ -93,6 +93,32 @@ class ConfigEntrySetupTests(unittest.IsolatedAsyncioTestCase):
         runtime.async_start.assert_awaited_once_with()
         self.assertIs(entry.runtime_data, runtime)
 
+    async def test_failed_platform_setup_stops_the_started_runtime(self) -> None:
+        # async_forward_entry_setups runs after the worker is up; sensor.py
+        # reads entry.runtime_data, so it cannot simply move later. HA keeps a
+        # failed entry out of async_unload_entry's reach (source: config_entries
+        # .py runs on_unload callbacks only), so the integration has to stop the
+        # runtime itself or the worker thread outlives the failed setup.
+        hass = SimpleNamespace(
+            config=FakeConfig(Path("/config")),
+            config_entries=Mock(
+                async_forward_entry_setups=AsyncMock(
+                    side_effect=RuntimeError("sensor platform failed")
+                ),
+            ),
+        )
+        entry = self.entry()
+        runtime = Mock()
+        runtime.async_start = AsyncMock()
+        runtime.async_stop = AsyncMock()
+        with patch(
+            "custom_components.hass_questdb_writer.HassQuestDbRuntime",
+            return_value=runtime,
+        ):
+            with self.assertRaises(RuntimeError):
+                await async_setup_entry(hass, entry)  # type: ignore[arg-type]
+        runtime.async_stop.assert_awaited_once_with()
+
     async def test_failed_setup_does_not_publish_runtime_data(self) -> None:
         hass = SimpleNamespace(config=FakeConfig(Path("/config")))
         entry = self.entry()

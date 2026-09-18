@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TypeAlias
 
@@ -85,6 +86,8 @@ from .worker import (
     WorkerStartError,
     WorkerStartTimeoutError,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 HassQuestDbConfigEntry: TypeAlias = ConfigEntry[HassQuestDbRuntime]
 
@@ -240,7 +243,21 @@ async def async_setup_entry(
             f"QuestDB writer did not start: {err}"
         ) from err
     entry.runtime_data = runtime
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    except BaseException:
+        # The runtime owns the worker, the state listener and the auth monitor.
+        # Home Assistant does not call async_unload_entry for an entry whose
+        # setup failed - it only runs the on_unload callbacks registered so far
+        # - so without this the worker would outlive the failed setup and the
+        # next retry would start a second one on the same spool file.
+        try:
+            await runtime.async_stop()
+        except Exception:
+            _LOGGER.exception(
+                "Could not stop the writer after config-entry setup failed"
+            )
+        raise
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     return True
 
