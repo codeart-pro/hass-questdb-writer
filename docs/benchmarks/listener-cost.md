@@ -18,35 +18,46 @@ This measurement answers it with numbers instead of intuition.
 - Architecture: native ARM64 under Podman/libkrun
 - Python: 3.14.6
 - serializer: `homeassistant.helpers.json.json_dumps` (the call the runtime makes)
-- attributes sizes: 146 B, 197 B, 2017 B of serialized JSON, i.e. the measured
-  average (139 B), p99 (191 B) and maximum (2011 B) from
-  [real-world-qss-data.md](real-world-qss-data.md)
-- samples per measurement: 20,000; repeats: 3
+- attributes sizes: 139 B, 191 B and 2011 B of serialized JSON, i.e. the measured
+  average, p99 and maximum from
+  [real-world-qss-data.md](real-world-qss-data.md); the harness pads the
+  attributes to hit the requested serialized size exactly
+- samples per measurement: 20,000; repeats: 5; warm-up: 2,000 samples discarded
+  before measuring
 
 ## Results
 
-Median (p50) and tail (p99) per phase, in microseconds, first repeat:
+Per phase, in microseconds, over 5 repeats of 20,000 samples each after the
+warm-up. Every cell is min / median / max **across the repeats** for that
+statistic, so one lucky run is not the measurement:
 
-| Attributes (B) | `json_dumps` | `EventEnvelope(...)` | `to_spool_event()` | total mean / p99 |
-|---:|---:|---:|---:|---:|
-| 146 | 0.67 / 0.96 | 3.54 / 5.25 | 7.75 / 60.9 | 13.5 / 71.0 |
-| 197 | 0.75 / 1.08 | 3.83 / 8.42 | 8.08 / 66.3 | 14.6 / 79.5 |
-| 2017 | 1.17 / 4.42 | 6.04 / 28.5 | 14.67 / 85.4 | 26.4 / 100.1 |
+| Attributes (B) | `json_dumps` p50 | `EventEnvelope(...)` p50 | `EventEnvelope(...)` p99 | `to_spool_event()` p50 | total mean |
+|---:|---:|---:|---:|---:|---:|
+| 139 | 0.67 / 0.67 / 0.67 | 3.50 / 3.54 / 3.58 | 10.8 / 12.2 / 14.3 | 7.67 / 7.71 / 7.75 | 13.2 / 13.3 / 13.5 |
+| 191 | 0.71 / 0.75 / 0.75 | 3.83 / 3.88 / 3.92 | 4.8 / 13.2 / 14.2 | 8.04 / 8.08 / 8.13 | 14.0 / 14.1 / 14.5 |
+| 2011 | 1.17 / 1.17 / 1.17 | 6.00 / 6.00 / 6.04 | 14.4 / 17.3 / 18.9 | 14.6 / 14.7 / 14.8 | 24.3 / 24.7 / 29.1 |
 
-Worst p99 over all repeats and sizes: **0.13 ms**, which is **0.8 %** of the
-16.4 ms of loop time one event may consume at the measured production peak
-(61 events/s; the median rate is 13 events/s, i.e. 76.9 ms per event).
+`total` is the sum of the three phases per event, not a fourth measurement.
+
+Worst p99 over all repeats and sizes: **0.108 ms**, i.e. **0.66 %** of the
+16.4 ms one event may occupy at the measured production peak (61 events/s; the
+median rate is 13 events/s, i.e. 76.9 ms per event).
+
+The tail of the two small sizes moves by a factor of three between repeats
+(4.8-14.3 µs) while their medians stay within a few percent: that is the usual
+shape of a micro-benchmark tail, and it is the reason the spread is reported
+instead of a single run.
 
 Command:
 
 ```text
-python -m benchmarks.listener_cost --events 20000 --repeats 3
+python -m benchmarks.listener_cost --events 20000 --repeats 5 --warmup 2000
 ```
 
 ## Interpretation
 
 The envelope construction - which includes the `json.loads` validation - costs
-3.5-6.0 µs per event, and the whole listener path 14-26 µs on average. At the
+3.5-6.0 µs per event, and the whole listener path 13-29 µs on average. At the
 measured rates that is a fraction of a percent of the available loop time, and
 the event rate would have to grow by more than two orders of magnitude before
 this path became the bottleneck.

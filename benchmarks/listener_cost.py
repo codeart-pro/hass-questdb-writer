@@ -171,7 +171,7 @@ def measure_size(
     }
 
 
-def run(*, samples: int, repeats: int) -> dict[str, Any]:
+def run(*, samples: int, repeats: int, warmup: int) -> dict[str, Any]:
     event_module = load_component()
     dumps, serializer_name, ha_dumps = serializer()
 
@@ -184,12 +184,36 @@ def run(*, samples: int, repeats: int) -> dict[str, Any]:
             "p99_us": percentile(reference, 0.99) * 1e6,
         }
 
+    # Warm-up: the first calls pay for imports, allocator growth and the caches
+    # inside the serializer, so they are measured and thrown away.
+    for size in PAYLOAD_SIZES:
+        measure_size(event_module, dumps, size, warmup)
+
     measurements = []
     for repeat in range(repeats):
         for size in PAYLOAD_SIZES:
             result = measure_size(event_module, dumps, size, samples)
             result["repeat"] = repeat
             measurements.append(result)
+
+    # Spread across repeats: a single repeat invites reading noise as a result,
+    # so the report carries the min/median/max of the per-repeat percentiles.
+    spread: dict[str, dict[str, dict[str, float]]] = {}
+    for size in PAYLOAD_SIZES:
+        rows = [m for m in measurements if m["target_attributes_bytes"] == size]
+        for field, statistic in (
+            ("serialize_us", "p50"),
+            ("envelope_us", "p50"),
+            ("envelope_us", "p99"),
+            ("spool_payload_us", "p50"),
+            ("total_us", "mean"),
+        ):
+            values = [row[field][statistic] for row in rows]
+            spread.setdefault(str(size), {})[f"{field}_{statistic}"] = {
+                "min": round(min(values), 2),
+                "median": round(statistics.median(values), 2),
+                "max": round(max(values), 2),
+            }
 
     budget_median_ms = 1000.0 / EVENTS_PER_SECOND_MEDIAN
     budget_peak_ms = 1000.0 / EVENTS_PER_SECOND_PEAK
@@ -201,19 +225,24 @@ def run(*, samples: int, repeats: int) -> dict[str, Any]:
             "platform": f"{platform.system()}-{platform.machine()}",
             "serializer": serializer_name,
             "samples_per_measurement": samples,
+            "warmup_samples": warmup,
             "repeats": repeats,
         },
         "production_reference": {
             "events_per_second_median": EVENTS_PER_SECOND_MEDIAN,
             "events_per_second_peak": EVENTS_PER_SECOND_PEAK,
-            "budget_at_median_ms": budget_median_ms,
-            "budget_at_peak_ms": budget_peak_ms,
+            # The inverse of a rate is the interval between events, not the time
+            # the loop has for one event: it is the yardstick a per-event cost is
+            # compared against, nothing tighter.
+            "inter_event_interval_at_median_ms": budget_median_ms,
+            "inter_event_interval_at_peak_ms": budget_peak_ms,
         },
         "ha_json_dumps_reference": ha_reference,
         "measurements": measurements,
+        "spread_across_repeats": spread,
         "verdict": {
             "worst_p99_ms": worst,
-            "share_of_peak_budget_percent": worst / budget_peak_ms * 100,
+            "share_of_peak_interval_percent": worst / budget_peak_ms * 100,
         },
     }
 
@@ -222,9 +251,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--events", type=int, default=20_000)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=2_000)
     args = parser.parse_args()
 
-    result = run(samples=args.events, repeats=args.repeats)
+    result = run(samples=args.events, repeats=args.repeats, warmup=args.warmup)
     print(json.dumps(result, indent=2))
 
 
