@@ -297,7 +297,13 @@ Accepted events stay in the ingress queue, so the condition itself loses
 nothing; once that queue is full, new events are dropped and counted in
 `overflowed_events`, exactly as for any other ingress overflow. The first
 durable write that succeeds after the condition clears returns the state to
-`RUNNING` and counts a recovery in `storage_recoveries`. Diagnostics also
+`RUNNING` and counts a recovery in `storage_recoveries`; delivery writes
+acknowledgements and attempt metadata to the same spool, so a pause opened by a
+failure there is closed by the next successful delivery too, without waiting for
+new ingress. A storage error while the spool *opens* is classified the same way
+but fails the setup instead ([ADR 0015](decisions/0015-spool-space-reclamation.md)):
+there is no worker to pause yet, and Home Assistant retries a failed setup on its
+own schedule. Diagnostics also
 report `disk_free_bytes` and `disk_reserve_bytes`, which separates a QuestDB
 outage (pending backlog grows) from a storage problem (blocks grow while free
 space sits at the reserve). Explicit tests reproduce `SQLITE_FULL` and

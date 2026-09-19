@@ -220,9 +220,13 @@ SQLite spool (at-least-once, bounded):
   pages of already delivered rows and truncates its WAL while the reserve is
   consumed ([ADR 0015](docs/decisions/0015-spool-space-reclamation.md)). Only
   events that no longer fit the in-memory queue are dropped, counted
-  in `overflowed_events`. The writer also leaves a free-space reserve untouched
-  (`Min free disk space` options below), so the recorder, logs and backups never
-  lose the last of the disk to the spool ([ADR 0014](docs/decisions/0014-spool-pressure-policy.md))
+  in `overflowed_events`. The writer also keeps a free-space reserve
+  (`Min free disk space` options below) and pauses instead of writing into it, so
+  the recorder, logs and backups are not the ones that lose the last of the disk
+  to the spool. The reserve is a pause threshold checked before every durable
+  write, not an untouched buffer: one write may cross it by up to one persist
+  batch before the next check stops the writer
+  ([ADR 0014](docs/decisions/0014-spool-pressure-policy.md))
 - **Logs**: rate-limited retry warnings (1st, 2nd, 4th… attempt), no spam
 
 ## Reading the data
@@ -428,6 +432,9 @@ from the spool.
 
 Unit and integration tests run inside a Home Assistant container
 (`pytest tests/unit tests/integration`), pointed at a local QuestDB. The
+mutation checkers under `dev/mutations/` re-run focused tests against a
+deliberately broken copy of one file, so a test that cannot fail is visible;
+`dev/mutations/README.md` has the exact commands. The
 dev environment — compose stack with HA/QuestDB/Grafana, dashboards,
 live-run checklist — is kept in a separate private repository.
 

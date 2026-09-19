@@ -109,9 +109,11 @@ In the native ARM64 Home Assistant 2026.7.2 container (Python 3.14.6, SQLite
   clears, with `storage_recoveries` incremented;
 - a blocked guard never reaches the write (`enqueue_many` call count stays 0
   while the reserve is consumed);
-- 283 unit tests pass, and three deliberate mutations of the new code (the
-  storage-error branch, the guard call, the recovery transition) each turn the
-  new tests red, so the tests are not vacuous.
+- the unit and integration suites pass, and the deliberate mutations in
+  `dev/mutations/mutation_check_reclaim.py` (the storage-error branch, the guard
+  call, the recovery transition and more) each turn the matching tests red, so
+  the tests are not vacuous. The checkers are committed and runnable from a
+  container instead of living in a local scratch directory.
 
 ## Required verification before production
 

@@ -53,6 +53,24 @@ proceed retried with `asyncio.sleep(0)` - 93 % of one core for the whole timeout
 7. **A flush that cannot proceed waits instead of spinning.** The stopping branch
    of the persist loop waits a 50 ms slice (bounded by the shutdown deadline)
    between attempts; the flush still takes a window that opens inside the slice.
+8. **Any durable write proves storage recovered, not only ingress persistence.**
+   Delivery deletes delivered rows and stores attempt metadata in the same
+   spool, so a pause opened by a failure there is closed by the next successful
+   delivery write as well. Without it a pause stays open, and the one rewrite per
+   pause stays consumed, while delivery is already running normally and no new
+   ingress arrives to clear it.
+9. **Storage failures at open are classified, and still fail the setup.** A spool
+   that cannot be written because the disk is full or read-only reports
+   `SpoolDiskFullError` or `SpoolReadOnlyError` instead of a generic spool
+   failure, so the entry names the condition an operator has to fix. Unlike a
+   runtime failure it does not pause: there is no worker yet, and Home Assistant
+   retries a failed setup on its own schedule.
+10. **The reserve is a pause threshold, and the documentation says so.** The guard
+    is checked before each durable write, so equality still allows that write and
+    the write may then cross the reserve by up to one persist batch
+    (`persist_batch_rows` events of at most `max_serialized_event_bytes` each).
+    The README states the threshold and the bound instead of promising an
+    untouched reserve.
 
 ## Consequences
 
@@ -67,21 +85,31 @@ proceed retried with `asyncio.sleep(0)` - 93 % of one core for the whole timeout
   payload byte, 4.6 KB per 2 KB row.
 - A filesystem with no headroom at all can still refuse a pass, because the WAL
   needs room to move pages; the pass reports the error, the pause continues, and
-  the next pass a second later tries again. The writer never fails on it.
+  the next pass a second later tries again. A failed pass is logged as a
+  reclamation failure and never turns the pause into a worker failure.
 - Legacy spools migrate on their first pause and behave as before until then.
-- While a pause is open the persist loop re-checks the guard on every wake-up,
-  which costs about 0.5 ms per attempt: measured at 16.9 % of one core with 300
-  events/s offered (accelerated), i.e. roughly 3 % at the measured production
-  peak of 61 events/s and under 1 % at the median rate. It is a cost proportional
-  to the offered rate, not a spin.
+- While a pause is open the persist loop re-checks the guard on every wake-up and
+  the reclamation passes run in the same window. Measured, not extrapolated: 13.2 %
+  of one core at the production peak of 61 events/s offered and 5.6 % at the
+  median rate of 13 events/s. It is a cost proportional to the offered rate, not a
+  spin (at 1,000 events/s offered the same window costs 17.1 %).
 
 ## Verification
 
 - Unit: incremental mode is set on new spools and read back; `reclaim` drains the
-  freelist and truncates the WAL; `compact` rewrites a legacy database and leaves
-  it in incremental mode; both report failures instead of raising; the worker
-  reclaims before pausing and ends a pause once space returns; the pause counter
-  stays at one while attempts grow; a blocked shutdown re-checks a handful of
-  times instead of thousands. Six mutations of the fix turn the new tests red.
+  freelist, truncates the WAL and returns space to the real filesystem (measured
+  with `shutil.disk_usage`, not a mock); `compact` rewrites a legacy database and
+  leaves it in incremental mode; both report failures instead of raising and a
+  failed pass keeps the pause; a full database at open is classified; the worker
+  reclaims before pausing, ends a pause once space returns, closes a pause that a
+  delivery-side write recovers, counts one pause per condition while attempts
+  grow, and re-checks a blocked shutdown a handful of times instead of thousands.
+  Delivered or durable is asserted by event identity, not by row counts. The
+  reserve boundary is pinned one byte below, at and above the reserve.
+- Mutations: nine deliberate edits of this fix (incremental mode, drained vacuum,
+  WAL truncation, reclaim-before-pause, pause counting, the shutdown wait,
+  delivery-side recovery, startup classification, the reserve boundary) each turn
+  the matching tests red. The checkers are committed under `dev/mutations/` and
+  runnable from a container, so the claim is reproducible.
 - Benchmark: `benchmarks/spool_pressure.py`; before and after numbers in
   [../benchmarks/spool-pressure.md](../benchmarks/spool-pressure.md).
