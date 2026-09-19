@@ -18,10 +18,12 @@ This measurement answers it with numbers instead of intuition.
 - Architecture: native ARM64 under Podman/libkrun
 - Python: 3.14.6
 - serializer: `homeassistant.helpers.json.json_dumps` (the call the runtime makes)
-- attributes sizes: 139 B, 191 B and 2011 B of serialized JSON, i.e. the measured
-  average, p99 and maximum from
-  [real-world-qss-data.md](real-world-qss-data.md); the harness pads the
-  attributes to hit the requested serialized size exactly
+- attributes sizes: the harness targets 139 B, 191 B and 2011 B of serialized
+  JSON - the measured average, p99 and maximum from
+  [real-world-qss-data.md](real-world-qss-data.md) - and the padding lands at
+  146 B, 197 B and 2017 B, which is what the table below reports. The target is
+  the request, not the outcome; the raw result carries both
+  (`target_attributes_bytes`, `measured_attributes_bytes`).
 - samples per measurement: 20,000; repeats: 5; warm-up: 2,000 samples discarded
   before measuring
 
@@ -33,9 +35,9 @@ statistic, so one lucky run is not the measurement:
 
 | Attributes (B) | `json_dumps` p50 | `EventEnvelope(...)` p50 | `EventEnvelope(...)` p99 | `to_spool_event()` p50 | total mean |
 |---:|---:|---:|---:|---:|---:|
-| 139 | 0.67 / 0.67 / 0.67 | 3.50 / 3.54 / 3.58 | 10.8 / 12.2 / 14.3 | 7.67 / 7.71 / 7.75 | 13.2 / 13.3 / 13.5 |
-| 191 | 0.71 / 0.75 / 0.75 | 3.83 / 3.88 / 3.92 | 4.8 / 13.2 / 14.2 | 8.04 / 8.08 / 8.13 | 14.0 / 14.1 / 14.5 |
-| 2011 | 1.17 / 1.17 / 1.17 | 6.00 / 6.00 / 6.04 | 14.4 / 17.3 / 18.9 | 14.6 / 14.7 / 14.8 | 24.3 / 24.7 / 29.1 |
+| 146 | 0.67 / 0.67 / 0.67 | 3.50 / 3.54 / 3.58 | 10.8 / 12.2 / 14.3 | 7.67 / 7.71 / 7.75 | 13.2 / 13.3 / 13.5 |
+| 197 | 0.71 / 0.75 / 0.75 | 3.83 / 3.88 / 3.92 | 4.8 / 13.2 / 14.2 | 8.04 / 8.08 / 8.13 | 14.0 / 14.1 / 14.5 |
+| 2017 | 1.17 / 1.17 / 1.17 | 6.00 / 6.00 / 6.04 | 14.4 / 17.3 / 18.9 | 14.6 / 14.7 / 14.8 | 24.3 / 24.7 / 29.1 |
 
 `total` is the sum of the three phases per event, not a fourth measurement.
 

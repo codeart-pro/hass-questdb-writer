@@ -248,8 +248,12 @@ def _digest(path: Path) -> str:
         return "unavailable"
 
 
-def _git_state(directory: Path) -> dict[str, Any]:
-    """Revision and dirty flag of a checkout, for the provenance of a run."""
+def _git_state(directory: Path, scope: Path | None = None) -> dict[str, Any]:
+    """Revision and dirty flag of a checkout, for the provenance of a run.
+
+    With a `scope`, only that path counts as dirty: a result must not look
+    uncommitted merely because a document outside the component was edited.
+    """
 
     def git(*arguments: str) -> str:
         try:
@@ -262,10 +266,13 @@ def _git_state(directory: Path) -> dict[str, Any]:
             return ""
         return completed.stdout.strip()
 
+    status: tuple[str, ...] = ("status", "--porcelain")
+    if scope is not None:
+        status = (*status, "--", str(scope))
     return {
-        "path": str(directory),
+        "path": str(scope or directory),
         "revision": git("rev-parse", "HEAD") or None,
-        "dirty": bool(git("status", "--porcelain")),
+        "dirty": bool(git(*status)),
     }
 
 
@@ -713,9 +720,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Provenance, so a baseline/fixed comparison is auditable from the
             # result file alone instead of relying on the reader's trust.
             "harness_sha256": _digest(Path(__file__)),
-            "harness_revision": _git_state(Path(__file__).resolve().parent.parent),
+            "harness_revision": _git_state(
+                Path(__file__).resolve().parent.parent, Path(__file__)
+            ),
             "component_revision": _git_state(
-                (component_dir or COMPONENT).resolve().parent.parent
+                (component_dir or COMPONENT).resolve().parent.parent,
+                (component_dir or COMPONENT),
             ),
             "arguments": vars(args),
         },

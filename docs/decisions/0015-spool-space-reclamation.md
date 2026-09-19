@@ -88,11 +88,13 @@ proceed retried with `asyncio.sleep(0)` - 93 % of one core for the whole timeout
   the next pass a second later tries again. A failed pass is logged as a
   reclamation failure and never turns the pause into a worker failure.
 - Legacy spools migrate on their first pause and behave as before until then.
-- While a pause is open the persist loop re-checks the guard on every wake-up and
-  the reclamation passes run in the same window. Measured, not extrapolated: 13.2 %
-  of one core at the production peak of 61 events/s offered and 5.6 % at the
-  median rate of 13 events/s. It is a cost proportional to the offered rate, not a
-  spin (at 1,000 events/s offered the same window costs 17.1 %).
+- While a pause is open the persist loop re-checks the guard on every wake-up, and
+  the reclamation passes run in the same window, so the blocked state costs CPU in
+  proportion to the offered rate rather than spinning. The benchmark reports that
+  cost **per state** (`blocked_steady_state.state_seconds`,
+  `cpu_seconds_in_blocked_state`) instead of attributing a whole window to the
+  pause: a window offered at the median rate can be spent in delivery retry, and
+  its CPU is not the cost of a pause.
 
 ## Verification
 
@@ -100,16 +102,22 @@ proceed retried with `asyncio.sleep(0)` - 93 % of one core for the whole timeout
   freelist, truncates the WAL and returns space to the real filesystem (measured
   with `shutil.disk_usage`, not a mock); `compact` rewrites a legacy database and
   leaves it in incremental mode; both report failures instead of raising and a
-  failed pass keeps the pause; a full database at open is classified; the worker
-  reclaims before pausing, ends a pause once space returns, closes a pause that a
-  delivery-side write recovers, counts one pause per condition while attempts
-  grow, and re-checks a blocked shutdown a handful of times instead of thousands.
-  Delivered or durable is asserted by event identity, not by row counts. The
-  reserve boundary is pinned one byte below, at and above the reserve.
-- Mutations: nine deliberate edits of this fix (incremental mode, drained vacuum,
-  WAL truncation, reclaim-before-pause, pause counting, the shutdown wait,
-  delivery-side recovery, startup classification, the reserve boundary) each turn
-  the matching tests red. The checkers are committed under `dev/mutations/` and
-  runnable from a container, so the claim is reproducible.
+  failed pass keeps the pause; a full database at open is classified (with a real
+  `SQLITE_FULL`; the natural occurrence on a genuinely full filesystem is
+  measured by the benchmark below); the worker reclaims before pausing, ends a
+  pause once space returns, closes a pause that a delivery-side write recovers -
+  on the retry backoff, not after `retry_max_seconds` - counts one pause per
+  condition while attempts grow, and re-checks a blocked shutdown a handful of
+  times instead of thousands. Delivered or durable is asserted by event identity,
+  not by row counts, and the receiver side of a re-sent batch is asserted against
+  a real QuestDB (one row, one distinct id). The reserve boundary is pinned one
+  byte below, at and above the reserve.
+- Mutations: sixteen deliberate edits (incremental mode, drained vacuum, WAL
+  truncation, reclaim-before-pause, pause counting, the bounded shutdown wait,
+  delivery-side recovery, the retry schedule, startup classification, the reserve
+  boundary and the connection/flow rules) each turn the matching tests red. The
+  checkers are committed under `dev/mutations/`, runnable from a container, and
+  report `UNDECIDED` rather than `CAUGHT` when the test selection itself failed to
+  run.
 - Benchmark: `benchmarks/spool_pressure.py`; before and after numbers in
   [../benchmarks/spool-pressure.md](../benchmarks/spool-pressure.md).
