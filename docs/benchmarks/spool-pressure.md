@@ -70,9 +70,15 @@ The verdict is computed from **event identity**, not from row counts:
 
 Counting rows could not see a loss that another event's re-delivery compensated;
 comparing the full set of distinct ids can. The result also carries its own
-provenance - harness digest and revision, component revision, dirty flag and the
-complete argument list (`environment.arguments`) - so the comparison below can be
-audited from the two result files without trusting this document.
+provenance - harness digest and revision, component revision and content digest,
+dirty flags and the complete argument list (`environment.arguments`) - so the
+comparison below can be audited from the two result files without trusting this
+document.
+
+The two tables below are rendered from those result files by
+`dev/benchmarks/refresh_pressure_numbers.py`, which rewrites them from the
+artifacts and has a `--check` mode that exits non-zero when this document and the
+artifacts disagree. Hand-typed numbers drift; a checked render cannot.
 
 What the sender does when a batch cannot be acknowledged locally, and what the
 destination then holds, is measured against the real QuestDB in the integration
