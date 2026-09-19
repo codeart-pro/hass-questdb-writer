@@ -183,7 +183,12 @@ metadata overhead, so a filesystem free-space guard bounds what the writer
 itself may consume: the reserve is
 `max(spool_min_free_bytes, spool_min_free_ratio * filesystem size)` and it is
 checked before every durable write
-([ADR 0014](decisions/0014-spool-pressure-policy.md)). Reaching the pending
+([ADR 0014](decisions/0014-spool-pressure-policy.md)). A spool this integration
+creates is also in incremental auto-vacuum mode: delivered rows free pages
+*inside* the file, so the writer returns those pages, together with the WAL, to
+the filesystem while the reserve is consumed - otherwise the disk the spool
+filled stays full and persistence stays paused
+([ADR 0015](decisions/0015-spool-space-reclamation.md)). Reaching the pending
 limit is visible through logs and diagnostics and pauses persistence instead of
 the worker. The dead-letter store is a
 bounded ring buffer: when a move would exceed its limits, the oldest rows are
@@ -282,7 +287,12 @@ flowing.
 
 Persistence pauses; the worker keeps running. The state becomes `BLOCKED` with
 a `block_reason` of `spool_full`, `disk_space`, `disk_full` or `readonly`, a
-rate-limited warning explains it, and `storage_blocks` counts the pauses.
+rate-limited warning explains it, and `storage_blocks` counts the pauses. The
+attempts that keep re-checking the condition are counted separately in
+`storage_block_attempts`, because the guard is re-evaluated on every persist
+attempt. Before it accepts a pause the worker asks the spool to return freed
+pages and truncate its WAL, so a disk the spool itself filled stops blocking
+once delivery has drained rows ([ADR 0015](decisions/0015-spool-space-reclamation.md)).
 Accepted events stay in the ingress queue, so the condition itself loses
 nothing; once that queue is full, new events are dropped and counted in
 `overflowed_events`, exactly as for any other ingress overflow. The first
@@ -471,8 +481,12 @@ The following require evidence before implementation defaults are frozen:
   on (evidence so far is empirical: 137M rows with zero duplicate keys, ADR
   0005);
 - overflow policy under a prolonged full-disk outage: the policy is decided in
-  [ADR 0014](decisions/0014-spool-pressure-policy.md), but the free-space
-  reserve defaults still need production measurements;
+  [ADR 0014](decisions/0014-spool-pressure-policy.md) and the reclamation that
+  ends a pause in [ADR 0015](decisions/0015-spool-space-reclamation.md), with the
+  disk cost measured at ~2 bytes per payload byte
+  ([benchmarks/spool-pressure.md](benchmarks/spool-pressure.md)); the reserve
+  defaults still need measurements on the production filesystem that the spool
+  shares with the recorder, logs and backups;
 - automatic worker restart policy;
 - whether dead-letter events need a separate QuestDB table or only local
   diagnostics.

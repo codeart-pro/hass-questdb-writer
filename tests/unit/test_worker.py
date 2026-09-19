@@ -247,6 +247,53 @@ class MutableFilesystem:
         )
 
 
+class ReclaimAwareFilesystem(MutableFilesystem):
+    """Free space that only comes back once the spool gives pages back.
+
+    Models the measured failure mode: the disk is full because the spool filled
+    it, so returning pages inside the spool file is what restores free space.
+    """
+
+    def __init__(
+        self, *, total_bytes: int, free_bytes: int, reclaims_until_free: int
+    ) -> None:
+        super().__init__(total_bytes=total_bytes, free_bytes=free_bytes)
+        self.free_after_reclaim = 10_000_000
+        self.reclaims_until_free = reclaims_until_free
+        self.reclaims = 0
+
+    def usage(self, path: Path) -> StorageUsage:
+        self.checks += 1
+        free = (
+            self.free_bytes
+            if self.reclaims < self.reclaims_until_free
+            else self.free_after_reclaim
+        )
+        return StorageUsage(total_bytes=self.total_bytes, free_bytes=free)
+
+    def note_reclaim(self) -> None:
+        self.reclaims += 1
+
+
+class ReclaimingSpool:
+    """Spool double that records the reclamations the worker asked for."""
+
+    def __init__(self, inner: object, filesystem: ReclaimAwareFilesystem) -> None:
+        self._inner = inner
+        self._filesystem = filesystem
+
+    @property
+    def path(self) -> Path:
+        return self._inner.path
+
+    def reclaim(self, *, max_pages: int) -> object:
+        self._filesystem.note_reclaim()
+        return self._inner.reclaim(max_pages=max_pages)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
 class WriterServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -1134,6 +1181,132 @@ class WriterServiceTests(unittest.TestCase):
         self.assertEqual(service.snapshot().storage_recoveries, 1)
         self.assertGreaterEqual(script.enqueue_calls, 1)
         service.stop(timeout_seconds=1)
+
+    def test_reclaim_prevents_a_pause_when_the_spool_has_pages_to_return(
+        self,
+    ) -> None:
+        # The measured case: the disk is full because the spool filled it, and
+        # the rows that were already delivered left free pages inside the file.
+        # Returning them is what restores free space, so the writer must ask
+        # before it pauses - no operator, no reload.
+        filesystem = ReclaimAwareFilesystem(
+            total_bytes=1_000_000, free_bytes=500, reclaims_until_free=1
+        )
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        script = StorageFailureScript()
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: ReclaimingSpool(
+                StorageFailureSpool(self.open_spool(), script), filesystem
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(filesystem.reclaims, 1)
+        self.assertEqual(snapshot.storage_blocks, 0)
+        self.assertGreaterEqual(script.enqueue_calls, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_pause_ends_when_reclaiming_frees_space(self) -> None:
+        # The first reclamation finds nothing (delivery has not drained a row
+        # yet), the pause is counted once, and the next pass returns the pages
+        # and clears it - the sequence the pressure benchmark measured.
+        filesystem = ReclaimAwareFilesystem(
+            total_bytes=1_000_000, free_bytes=500, reclaims_until_free=2
+        )
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: ReclaimingSpool(
+                StorageFailureSpool(self.open_spool(), StorageFailureScript()),
+                filesystem,
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: service.snapshot().persisted_events == 1, timeout=5
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.state, WorkerState.RUNNING)
+        self.assertEqual(snapshot.storage_blocks, 1)
+        self.assertEqual(snapshot.storage_recoveries, 1)
+        self.assertGreaterEqual(filesystem.reclaims, 2)
+        service.stop(timeout_seconds=1)
+
+    def test_storage_blocks_counts_pauses_not_attempts(self) -> None:
+        # Measured: one pause produced 284,249 "cumulative pauses" because the
+        # counter followed every blocked attempt
+        # (docs/benchmarks/spool-pressure.md).
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            settings=self.settings(persist_idle_poll_seconds=0.01),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), StorageFailureScript()
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        for index in range(3):
+            service.submit(self.event(index))
+        self.wait_for(
+            lambda: service.snapshot().storage_block_attempts >= 5
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.storage_blocks, 1)
+        self.assertGreaterEqual(snapshot.storage_block_attempts, 5)
+        service.stop(timeout_seconds=0.5)
+
+    def test_shutdown_with_a_blocked_flush_does_not_spin(self) -> None:
+        # Measured: the stopping branch retried with asyncio.sleep(0), so a
+        # shutdown that cannot flush burned a whole core for the full timeout
+        # (docs/benchmarks/spool-pressure.md).
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), StorageFailureScript()
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        checks_before = filesystem.checks
+        service.stop(timeout_seconds=0.4)
+        blocked_checks = filesystem.checks - checks_before
+        # A 0.4 s shutdown may re-check a handful of times, not thousands: the
+        # flush still retries, it just waits between attempts now. The pause it
+        # is stuck in stays one pause, however many times it re-checks.
+        self.assertLess(blocked_checks, 40)
+        self.assertEqual(service.snapshot().storage_blocks, 1)
+        self.assertGreater(service.snapshot().storage_block_attempts, 1)
 
     def test_storage_block_keeps_every_accepted_event_until_stop(self) -> None:
         script = StorageFailureScript(

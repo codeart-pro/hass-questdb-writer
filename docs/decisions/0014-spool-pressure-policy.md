@@ -57,7 +57,11 @@ implements.
    stays fatal: a broken invariant must not loop forever.
 6. **The worker recovers by itself.** The first durable write that succeeds
    after a storage block clears the reason, returns the state to `RUNNING` and
-   counts a recovery. There is no manual step and no reload.
+   counts a recovery. There is no manual step and no reload. The space may have
+   to be reclaimed from the spool first, which
+   [ADR 0015](0015-spool-space-reclamation.md) implements: pages freed by
+   delivered rows stay inside the SQLite file and would otherwise keep the
+   filesystem below its reserve for good.
 7. **Loss is measurable.** `overflowed_events` counts what the ingress queue
    refused; diagnostics expose `storage_blocks`, `storage_recoveries`,
    `disk_free_bytes` and `disk_reserve_bytes` next to the block reason, so an

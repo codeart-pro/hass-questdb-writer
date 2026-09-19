@@ -31,9 +31,11 @@ from .event import EventEnvelope, EventEnvelopeError
 from .ilp import IlpEncodingError
 from .schema import SchemaError, SchemaMismatchError
 from .spool import (
+    AUTO_VACUUM_INCREMENTAL,
     DeadLetterFullError,
     NewSpoolEvent,
     SpoolDiskFullError,
+    SpoolError,
     SpoolFullError,
     SpoolReadOnlyError,
     SpoolRecord,
@@ -79,6 +81,22 @@ _BLOCK_REASON_BY_STORAGE_ERROR: Final = {
     SpoolReadOnlyError: _BLOCK_READ_ONLY,
 }
 
+# Reclamation bounds. Delivered rows leave free pages inside the spool file, and
+# the filesystem keeps the space until those pages are given back, so a writer
+# paused on a disk it filled itself would stay paused forever
+# (docs/benchmarks/spool-pressure.md). One pass moves at most 256 pages - 1 MiB
+# at SQLite's 4 KiB page size and, because incremental vacuuming writes through
+# the write-ahead log before truncating it, at most ~1 MiB of extra WAL at a
+# time: a 4,096-page pass needed 16.9 MB of WAL and filled a filesystem that was
+# already at its reserve. Passes are spaced by a second, so reclamation returns
+# at most ~1 MiB/s - the measured production rate is 0.03-0.12 MiB/s of new
+# payload, and the writer is paused anyway while this runs. A database created
+# before incremental auto-vacuum was set cannot return pages at all: it gets
+# exactly one rewrite per pause instead.
+_RECLAIM_MAX_PAGES: Final = 256
+_RECLAIM_INTERVAL_SECONDS: Final = 1.0
+_SHUTDOWN_RETRY_SECONDS: Final = 0.05
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -120,6 +138,10 @@ class SpoolHandle(Protocol):
     ) -> tuple[SpoolRecord, ...]: ...
 
     def mark_delivered(self, sequences: tuple[int, ...]) -> int: ...
+
+    def reclaim(self, *, max_pages: int) -> object: ...
+
+    def compact(self) -> object: ...
 
     def record_attempt(
         self,
@@ -297,6 +319,7 @@ class WorkerSnapshot:
     block_reason: str | None = None
     last_errors: tuple[WorkerErrorRecord, ...] = ()
     storage_blocks: int = 0
+    storage_block_attempts: int = 0
     storage_recoveries: int = 0
     disk_free_bytes: int | None = None
     disk_reserve_bytes: int | None = None
@@ -430,7 +453,15 @@ class WriterService:
         self._block_reason: str | None = None
         self._last_errors: deque[WorkerErrorRecord] = deque(maxlen=10)
         self._storage_blocks = 0
+        self._storage_block_attempts = 0
         self._storage_recoveries = 0
+        # The open storage pause, if any. Tracked explicitly because the worker
+        # state changes for reasons of its own (shutdown moves it to STOPPING),
+        # and a counter that follows the state would count one pause many times
+        # (docs/benchmarks/spool-pressure.md).
+        self._storage_episode: str | None = None
+        self._last_reclaim: float | None = None
+        self._rewrite_attempted = False
         self._disk_status: StorageStatus | None = None
 
     def start(self, *, timeout_seconds: float) -> None:
@@ -548,6 +579,7 @@ class WriterService:
                 block_reason=self._block_reason,
                 last_errors=tuple(self._last_errors),
                 storage_blocks=self._storage_blocks,
+                storage_block_attempts=self._storage_block_attempts,
                 storage_recoveries=self._storage_recoveries,
                 disk_free_bytes=None if disk is None else disk.free_bytes,
                 disk_reserve_bytes=None if disk is None else disk.reserve_bytes,
@@ -647,6 +679,9 @@ class WriterService:
         if status is not None and status.blocked:
             # Cheaper and safer than discovering the same thing from SQLITE_FULL
             # after a write was already attempted.
+            if self._reclaim_spool(spool):
+                status = self._check_storage(spool)
+        if status is not None and status.blocked:
             self._block_on_storage(_BLOCK_DISK_SPACE, _storage_status_text(status))
             return False
         try:
@@ -689,11 +724,19 @@ class WriterService:
         so the worker stays alive, keeps the ingress queue, and retries. Once
         the queue fills, new events are dropped and counted in
         ``overflowed_events`` exactly like any other ingress overflow.
+
+        Counts one pause per condition rather than one per attempt: the guard is
+        re-evaluated on every persist attempt, which reached six figures inside
+        a single pause (docs/benchmarks/spool-pressure.md).
         """
         with self._lock:
-            self._storage_blocks += 1
+            self._storage_block_attempts += 1
+            first_attempt = self._storage_episode is None
+            if first_attempt:
+                self._storage_episode = reason
+                self._storage_blocks += 1
             count = self._storage_blocks
-        if _log_on_power_of_two(count):
+        if first_attempt and _log_on_power_of_two(count):
             _LOGGER.warning(
                 "Spool persistence paused (%s): %s. Accepted events stay in the "
                 "ingress queue and persistence resumes when storage recovers; "
@@ -712,16 +755,93 @@ class WriterService:
     def _resume_after_storage_block(self) -> None:
         """Leave a storage block once a durable write succeeds again."""
         with self._lock:
-            blocked = (
+            resumed = self._storage_episode is not None
+            if resumed:
+                self._storage_recoveries += 1
+                self._storage_episode = None
+            self._rewrite_attempted = False
+            show_running = (
                 self._state is WorkerState.BLOCKED
                 and self._block_reason in _STORAGE_BLOCK_REASONS
             )
-            if blocked:
-                self._storage_recoveries += 1
-        if blocked:
+            pauses = self._storage_blocks
+        if show_running:
+            _LOGGER.info(
+                "Spool persistence resumed after storage recovered; "
+                "cumulative pauses: %d.",
+                pauses,
+            )
             self._set_delivery_state(
                 WorkerState.RUNNING, last_error=None, retry_delay=None
             )
+
+    def _reclaim_spool(self, spool: SpoolHandle) -> bool:
+        """Ask the owned spool for freed pages and the WAL; True when it moved.
+
+        Delivered rows leave free pages inside the file, so the space a paused
+        writer needs may be one reclamation away
+        (docs/benchmarks/spool-pressure.md). Rate-limited: reclamation writes,
+        and the guard is checked on every persist attempt. A database created
+        without incremental auto-vacuum cannot return pages at all, so it gets
+        one rewrite per pause instead.
+        """
+        reclaim = getattr(spool, "reclaim", None)
+        if reclaim is None:
+            return False
+        now = self._monotonic()
+        last = self._last_reclaim
+        if last is not None and now - last < _RECLAIM_INTERVAL_SECONDS:
+            return False
+        self._last_reclaim = now
+        try:
+            result = reclaim(max_pages=_RECLAIM_MAX_PAGES)
+        except SpoolError as exc:
+            _LOGGER.warning(
+                "Spool reclamation failed: %s. Persistence stays paused until "
+                "the filesystem has room again.",
+                _error_text(exc),
+            )
+            return False
+        error = getattr(result, "error", None)
+        if error is not None:
+            _LOGGER.warning(
+                "Spool reclamation failed: %s. Persistence stays paused until "
+                "the filesystem has room again.",
+                error,
+            )
+            return False
+        if (
+            getattr(result, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)
+            != AUTO_VACUUM_INCREMENTAL
+            and not self._rewrite_attempted
+        ):
+            # A database from before this policy: only a rewrite returns its
+            # space, and it is worth exactly one attempt per pause - it needs
+            # room to run, which is what a full disk does not have.
+            self._rewrite_attempted = True
+            compact = getattr(spool, "compact", None)
+            if compact is not None:
+                try:
+                    rewritten = compact()
+                except SpoolError as exc:
+                    _LOGGER.warning(
+                        "Spool rewrite failed: %s. Persistence stays paused "
+                        "until the filesystem has room again.",
+                        _error_text(exc),
+                    )
+                    return False
+                rewrite_error = getattr(rewritten, "error", None)
+                if rewrite_error is not None:
+                    _LOGGER.warning(
+                        "Spool rewrite failed: %s. Persistence stays paused "
+                        "until the filesystem has room again.",
+                        rewrite_error,
+                    )
+                    return False
+                return True
+        return bool(getattr(result, "freed_pages", 0)) or bool(
+            getattr(result, "wal_truncated", False)
+        )
 
     def _signal_loop(self, action: Callable[[], None]) -> None:
         """Run an event setter on the worker loop from another thread."""
@@ -815,7 +935,17 @@ class WriterService:
                         f"shutdown left {len(held) + self._ingress.qsize()} "
                         "accepted events unpersisted"
                     )
-                await asyncio.sleep(0)
+                # A flush that cannot proceed (storage blocked, for instance)
+                # must not retry in a hot loop: measured at 93 % of one core for
+                # the whole timeout (docs/benchmarks/spool-pressure.md). Wait a
+                # short slice instead - a flush that becomes possible is still
+                # taken within it.
+                remaining = (
+                    _SHUTDOWN_RETRY_SECONDS
+                    if deadline is None
+                    else min(_SHUTDOWN_RETRY_SECONDS, max(0.0, deadline - self._monotonic()))
+                )
+                await asyncio.sleep(remaining)
                 continue
             # Clearing here cannot lose a submit(): `submit` signals through
             # `call_soon_threadsafe`, whose callback only runs when this coroutine

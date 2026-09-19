@@ -2,6 +2,10 @@
 
 Date: 2026-09-19
 
+> The four findings below were addressed in
+> [ADR 0015](../decisions/0015-spool-space-reclamation.md); the last section
+> records the acceptance run and the before/after numbers.
+
 ## Question
 
 [ADR 0014](../decisions/0014-spool-pressure-policy.md) decides what happens when
@@ -141,6 +145,40 @@ pauses in that run was one. The rate-limited warning reads "cumulative pauses:
   without waiting, so a flush that cannot proceed spins until the deadline. On a
   Home Assistant host that is a full core spent during reload or shutdown, at the
   moment the disk is already full.
+
+## After the fix (2026-09-19)
+
+The policies of [ADR 0015](../decisions/0015-spool-space-reclamation.md) were
+implemented and the same benchmark was run as the acceptance test. Because the
+reclamation is bounded per pass, this run uses a 32 MiB filesystem (reserve
+16 MiB) and offers 300 events/s: a load the writer can out-reclaim, unlike the
+accelerated 1,000 events/s of the run above.
+
+| Quantity | Before the fix | After the fix |
+|---|---|---|
+| Pauses ended by the writer itself (`storage_recoveries`) | 0 | **4** |
+| Free space at the end of the run | 14.4 MiB of 64 MiB, below the 16 MiB reserve | 18.7 MiB of 32 MiB, above the 16 MiB reserve |
+| WAL at the end | 4.9 MiB | **0**, truncated by every reclamation pass |
+| WAL peak | 5.1 MiB | 4.9 MiB (bounded: a 4,096-page pass needed 16.9 MB) |
+| Disk peak | the whole filesystem (67 MB of 64 MiB) | 21.2 MiB of 32 MiB |
+| Shutdown with a flush that could not proceed | 5.0 s, 93 % of one core, `stopped_cleanly: false` | **2.6 s, 5.7 % of one core, `stopped_cleanly: true`** |
+| Accepted events that were never persisted | 1,100 | **0** |
+| `storage_blocks` for the run | 284,249 for one pause | 7 pauses (attempts are counted separately in `storage_block_attempts`) |
+| Verdict | nothing lost, but the writer stayed paused | `nothing_lost: true`, with 233 re-delivered rows |
+
+The last row is the point of the exercise: the writer ended every pause by
+itself, freed the space its own spool was holding, flushed the events that had
+been waiting, and delivered everything that was persisted. The 233 re-delivered
+rows are at-least-once in action - a batch whose response was lost during the
+TLS-less outage was sent again - which is why the benchmark reports the count
+instead of asserting equality.
+
+Cost while blocked: 16.9 % of one core in the 10 s steady-state window at 300
+offered events/s. That is the persist loop re-checking the guard once per
+wake-up (about 0.5 ms per attempt) plus the reclamation passes, so it scales with
+the offered rate rather than being a spin: at the measured production peak of 61
+events/s the same loop is roughly 3 % of one core, and at the median rate under
+1 %.
 
 ## What this does not cover
 

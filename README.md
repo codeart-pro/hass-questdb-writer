@@ -215,8 +215,11 @@ SQLite spool (at-least-once, bounded):
 - **Full spool or full disk**: persistence pauses instead of the writer dying -
   the state becomes `blocked` and diagnostics name the reason (`spool_full`,
   `disk_space`, `disk_full` or `readonly`). Accepted events stay queued, the
-  writer keeps retrying and resumes by itself once QuestDB or the filesystem is
-  back. Only events that no longer fit the in-memory queue are dropped, counted
+  writer keeps retrying and resumes by itself once QuestDB is back or storage
+  recovers - including when the spool is what filled the disk: it returns the
+  pages of already delivered rows and truncates its WAL while the reserve is
+  consumed ([ADR 0015](docs/decisions/0015-spool-space-reclamation.md)). Only
+  events that no longer fit the in-memory queue are dropped, counted
   in `overflowed_events`. The writer also leaves a free-space reserve untouched
   (`Min free disk space` options below), so the recorder, logs and backups never
   lose the last of the disk to the spool ([ADR 0014](docs/decisions/0014-spool-pressure-policy.md))
@@ -328,7 +331,7 @@ while the connection is failing. Check the integration state:
    | `could not reach QuestDB` / connection refused | Wrong host/port or QuestDB down | Reconfigure; check the host reachability from the HA container |
    | `HTTP 401` / rejected credentials | Wrong username/password | Reconfigure |
    | `table ... does not match the owned schema` | Table was created outside the integration (Web Console, Grafana…) | Drop the table, or point the entry at a fresh table name |
-   | `spool is full` / `Spool persistence paused` | the spool reached a capacity limit, the filesystem ran out of space, or the database became read-only | fix the connection, or free space; accepted events stay queued and the writer resumes by itself — this case never moves events into the dead letter |
+   | `spool is full` / `Spool persistence paused` | the spool reached a capacity limit, the filesystem ran out of space, or the database became read-only | fix the connection; accepted events stay queued and the writer resumes by itself, returning the pages of delivered rows to the filesystem when the spool is what filled the disk — this case never moves events into the dead letter |
 
 ### The table is not created
 

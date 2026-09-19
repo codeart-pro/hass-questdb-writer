@@ -630,6 +630,131 @@ class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
         spool.close()
         self.assertIsNone(spool._connection)
 
+    def test_new_spool_uses_incremental_auto_vacuum(self) -> None:
+        # Measured on a sized filesystem: deleting delivered rows frees pages
+        # inside the file, not space on the disk, so a spool that cannot give
+        # pages back keeps the writer paused forever on a disk it filled itself
+        # (docs/benchmarks/spool-pressure.md). Incremental auto-vacuum is the
+        # mechanism that returns them, and it only takes effect on a database
+        # that had it set before the first table existed.
+        with self.open_spool() as spool:
+            other = sqlite3.connect(self.path)
+            mode = other.execute("PRAGMA auto_vacuum").fetchone()[0]
+            other.close()
+        self.assertEqual(mode, 2)
+
+    def test_reclaim_returns_the_space_of_delivered_rows(self) -> None:
+        spool = self.open_spool(
+            max_pending_rows=5_000,
+            max_pending_bytes=10_000_000,
+            max_event_bytes=4_096,
+            max_dead_letter_bytes=10_000_000,
+        )
+        with spool:
+            self._fill_and_deliver(spool, rows=4_000)
+            before = self.path.stat().st_size
+            freelist_before = spool._db.execute(
+                "PRAGMA freelist_count"
+            ).fetchone()[0]
+            reclaim = spool.reclaim(max_pages=4_096)
+        self.assertEqual(reclaim.error, None)
+        self.assertEqual(reclaim.auto_vacuum, 2)
+        # `PRAGMA incremental_vacuum(N)` reports one row per page it moves, so a
+        # cursor that is not drained moves a single page per call. The bound
+        # here is the whole freelist of an emptied spool, not a token page.
+        self.assertGreaterEqual(reclaim.freed_pages, freelist_before - 1)
+        self.assertTrue(reclaim.wal_truncated)
+        after = self.path.stat().st_size
+        self.assertLess(after, before / 2)
+
+    def test_reclaim_frees_no_more_pages_than_asked(self) -> None:
+        # The worker runs this between durable writes, so one call has to be
+        # bounded: the tail it does not reach is taken by the next call.
+        spool = self.open_spool(
+            max_pending_rows=5_000,
+            max_pending_bytes=10_000_000,
+            max_event_bytes=4_096,
+            max_dead_letter_bytes=10_000_000,
+        )
+        with spool:
+            self._fill_and_deliver(spool, rows=4_000)
+            first = spool.reclaim(max_pages=64)
+            second = spool.reclaim(max_pages=64)
+        self.assertLessEqual(first.freed_pages, 64)
+        self.assertLessEqual(second.freed_pages, 64)
+
+    def test_compact_rewrites_a_spool_created_without_incremental_mode(self) -> None:
+        # Databases created before this policy cannot switch mode in place: a
+        # rewrite is the only way to give their space back, so it has to work and
+        # to leave the database in incremental mode for good.
+        legacy = sqlite3.connect(self.path)
+        legacy.execute("CREATE TABLE pre_existing (id INTEGER)")
+        legacy.commit()
+        legacy.close()
+        spool = self.open_spool(
+            max_pending_rows=5_000,
+            max_pending_bytes=10_000_000,
+            max_event_bytes=4_096,
+            max_dead_letter_bytes=10_000_000,
+        )
+        with spool:
+            other = sqlite3.connect(self.path)
+            self.assertEqual(other.execute("PRAGMA auto_vacuum").fetchone()[0], 0)
+            other.close()
+            self._fill_and_deliver(spool, rows=4_000)
+            before = self.path.stat().st_size
+            compact = spool.compact()
+            after = self.path.stat().st_size
+        self.assertEqual(compact.error, None)
+        self.assertTrue(compact.rewrote_file)
+        self.assertLess(after, before)
+        other = sqlite3.connect(self.path)
+        self.assertEqual(other.execute("PRAGMA auto_vacuum").fetchone()[0], 2)
+        other.close()
+
+    def test_reclaim_and_compact_report_failures_instead_of_raising(self) -> None:
+        # Reclamation runs while the writer is paused on a full disk: an error
+        # there must not turn a pause into a failure. A read-only connection is
+        # the easiest way to make both mechanisms fail for real (setting
+        # `max_page_count` below the current size is ignored by SQLite, so it
+        # cannot be used once the database has pages).
+        spool = self.open_spool(
+            max_pending_rows=5_000,
+            max_pending_bytes=10_000_000,
+            max_event_bytes=4_096,
+            max_dead_letter_bytes=10_000_000,
+        )
+        with spool:
+            payload = b"x" * 2_011
+            spool.enqueue_many(
+                tuple(
+                    NewSpoolEvent(f"event-{index}", payload, index)
+                    for index in range(200)
+                )
+            )
+            spool._db.execute("PRAGMA query_only = ON")
+            reclaim = spool.reclaim(max_pages=64)
+            compact = spool.compact()
+            spool._db.execute("PRAGMA query_only = OFF")
+        self.assertIsNotNone(reclaim.error)
+        self.assertIsNotNone(compact.error)
+        # A spool that is already closed is a caller mistake, not a crash.
+        self.assertIsNotNone(spool.reclaim(max_pages=1).error)
+        self.assertIsNotNone(spool.compact().error)
+
+    def _fill_and_deliver(self, spool: SQLiteSpool, *, rows: int) -> None:
+        payload = b"x" * 2_011
+        for start in range(0, rows, 100):
+            spool.enqueue_many(
+                tuple(
+                    NewSpoolEvent(f"event-{index}", payload, index)
+                    for index in range(start, min(start + 100, rows))
+                )
+            )
+        batch = spool.peek_batch(max_rows=rows, max_bytes=10_000_000)
+        self.assertEqual(len(batch), rows)
+        spool.mark_delivered(tuple(record.sequence for record in batch))
+
 
 if __name__ == "__main__":
     unittest.main()

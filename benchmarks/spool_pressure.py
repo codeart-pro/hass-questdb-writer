@@ -404,21 +404,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     recovery_seconds = time.monotonic() - recovery_started
     recovered = service.snapshot()
 
-    transport = modules["transport"].IlpHttpTransport(
-        args.writer_host, args.writer_port, **transport_kwargs
-    )
-    rows_in_questdb = None
-    with contextlib.suppress(Exception):
-        result = transport.exec_query(f"select count() from {args.table}")
-        rows_in_questdb = int(result["dataset"][0][0])
-    transport.close()
-
     stop_started = time.monotonic()
     stop_cpu_before = cpu_seconds()
     stopped_cleanly = service.stop(timeout_seconds=args.stop_timeout_seconds)
     shutdown_seconds = time.monotonic() - stop_started
     shutdown_cpu = cpu_seconds() - stop_cpu_before
     final = service.snapshot()
+
+    # Counted after the shutdown flush, so the number covers everything the
+    # writer ever persisted - including the events it had to free space for.
+    transport = modules["transport"].IlpHttpTransport(
+        args.questdb_host, args.questdb_port, **transport_kwargs
+    )
+    rows_in_questdb = None
+    with contextlib.suppress(Exception):
+        result = transport.exec_query(f"select count() from {args.table}")
+        rows_in_questdb = int(result["dataset"][0][0])
+    transport.close()
     sampler.stop()
     sampler.join(timeout=5)
     forwarder.close()
@@ -452,10 +454,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             writer.writeheader()
             writer.writerows(samples)
 
+    # At-least-once, stated as the invariant that matters: every persisted event
+    # reached QuestDB or is still durable in the spool, and nothing went to the
+    # dead letter. Re-delivery after an uncertain request can duplicate rows, so
+    # the count is a lower bound, not an equality.
+    delivered_or_durable = (
+        None if rows_in_questdb is None else rows_in_questdb + final.pending_rows
+    )
     nothing_lost = (
-        recovered.pending_rows == 0
-        and final.dead_lettered_events == 0
-        and rows_in_questdb == final.persisted_events
+        final.dead_lettered_events == 0
+        and delivered_or_durable is not None
+        and delivered_or_durable >= final.persisted_events
     )
     return {
         "environment": {
@@ -523,7 +532,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "dead_lettered_events": final.dead_lettered_events,
             "storage_recoveries": recovered.storage_recoveries,
             "rows_in_questdb": rows_in_questdb,
-            "final_pending_rows": final.pending_rows,
+            "rows_still_in_spool": final.pending_rows,
+            "final_persisted_events": final.persisted_events,
+            "re_delivered_rows": (
+                None
+                if delivered_or_durable is None
+                else delivered_or_durable - final.persisted_events
+            ),
             "final_db_bytes": final_db,
             "final_wal_bytes": final_wal,
             "space_returned_bytes": usage_after.free - usage_before.free,

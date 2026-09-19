@@ -15,6 +15,11 @@ from typing import Final, Self
 SCHEMA_VERSION: Final = 1
 _SQLITE_INTEGER_MIN: Final = -(2**63)
 _SQLITE_INTEGER_MAX: Final = 2**63 - 1
+# `PRAGMA auto_vacuum`: 0 is off, 1 is full, 2 is incremental. Incremental is
+# the mode this spool wants: it returns freed pages on request, in bounded
+# steps, instead of rewriting the file at every opportunity.
+AUTO_VACUUM_NONE: Final = 0
+AUTO_VACUUM_INCREMENTAL: Final = 2
 
 
 class SpoolError(Exception):
@@ -98,6 +103,17 @@ def classify_storage_error(exc: sqlite3.Error, message: str) -> SpoolError:
     if code in _READ_ONLY_SQLITE_CODES:
         return SpoolReadOnlyError(f"{message}: database or filesystem is read-only")
     return SpoolError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class SpoolReclaim:
+    """What one reclamation attempt returned to the filesystem."""
+
+    auto_vacuum: int
+    freed_pages: int
+    wal_truncated: bool
+    rewrote_file: bool = False
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +245,21 @@ _SCHEMA_STATEMENTS: Final = (
 )
 
 
+def _freelist_pages(connection: sqlite3.Connection) -> int:
+    """Pages SQLite holds free inside the file, waiting to be returned."""
+    return int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+
+
+def _truncate_wal(connection: sqlite3.Connection) -> bool:
+    """Checkpoint the write-ahead log and truncate it; True when it is empty.
+
+    In WAL mode a freed page reaches the filesystem only after a checkpoint, so
+    reclamation has to truncate as well as vacuum.
+    """
+    busy = int(connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0])
+    return busy == 0
+
+
 def _positive_integer(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -322,6 +353,7 @@ class SQLiteSpool:
             raise ValueError("busy_timeout_seconds must be positive and finite")
 
         self._connection: sqlite3.Connection | None = None
+        self._auto_vacuum = AUTO_VACUUM_NONE
         try:
             connection = sqlite3.connect(
                 path,
@@ -330,6 +362,19 @@ class SQLiteSpool:
             )
             connection.row_factory = sqlite3.Row
             self._connection = connection
+            # Delivered rows free pages inside the file, and a file that never
+            # gives them back keeps the writer paused on the disk it filled
+            # itself (docs/benchmarks/spool-pressure.md). Incremental
+            # auto-vacuum is what returns them, and SQLite accepts the mode only
+            # before anything is written to the database: switching the journal
+            # mode to WAL below already initializes the file, so this has to
+            # come first (measured: setting it after WAL silently keeps mode 0).
+            # On an existing database it is a no-op - the mode there can only be
+            # changed by a rewrite, which is what `compact()` does.
+            connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            self._auto_vacuum = int(
+                connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+            )
             journal_mode = connection.execute(
                 "PRAGMA journal_mode = WAL"
             ).fetchone()[0]
@@ -641,6 +686,83 @@ class SQLiteSpool:
         except sqlite3.Error as exc:
             raise classify_storage_error(exc, "failed to mark events delivered") from exc
         return len(sequence_values)
+
+    def reclaim(self, *, max_pages: int) -> SpoolReclaim:
+        """Return freed pages and the write-ahead log to the filesystem.
+
+        Delivered rows free pages *inside* the file, and the filesystem keeps
+        the space until they are given back: a writer paused on a full disk
+        otherwise stays paused forever
+        (docs/benchmarks/spool-pressure.md). Incremental auto-vacuum returns
+        them in bounded steps, so a call is cheap enough to sit next to a
+        durable write; a database created without that mode needs
+        :meth:`compact` instead.
+
+        Never raises: reclamation runs while the writer is paused, and a pause
+        must not turn into a failure.
+        """
+        _positive_integer("max_pages", max_pages)
+        freed_pages = 0
+        try:
+            connection = self._db
+            if self._auto_vacuum == AUTO_VACUUM_INCREMENTAL:
+                before = _freelist_pages(connection)
+                # Drained on purpose: `incremental_vacuum(N)` returns one row per
+                # page it moves, and a statement that is never iterated moves a
+                # single page (measured: 1 page per call instead of 4,096).
+                connection.execute(
+                    f"PRAGMA incremental_vacuum({max_pages})"
+                ).fetchall()
+                freed_pages = max(0, before - _freelist_pages(connection))
+            wal_truncated = _truncate_wal(connection)
+        except (sqlite3.Error, SpoolClosedError) as exc:
+            return SpoolReclaim(
+                auto_vacuum=self._auto_vacuum,
+                freed_pages=freed_pages,
+                wal_truncated=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return SpoolReclaim(
+            auto_vacuum=self._auto_vacuum,
+            freed_pages=freed_pages,
+            wal_truncated=wal_truncated,
+        )
+
+    def compact(self) -> SpoolReclaim:
+        """Rewrite the file and switch it to incremental auto-vacuum.
+
+        The only way to give space back for a database created before
+        incremental auto-vacuum was set: SQLite can change the mode only through
+        a rewrite, and that rewrite needs room for the live data while it runs.
+        It can therefore fail on the filesystem that is already full, which is
+        why new spools are created in incremental mode and this is the fallback.
+
+        Never raises.
+        """
+        try:
+            connection = self._db
+            before = _freelist_pages(connection)
+            if self._auto_vacuum != AUTO_VACUUM_INCREMENTAL:
+                connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            connection.execute("VACUUM").fetchall()
+            self._auto_vacuum = int(
+                connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+            )
+            freed_pages = max(0, before - _freelist_pages(connection))
+            wal_truncated = _truncate_wal(connection)
+        except (sqlite3.Error, SpoolClosedError) as exc:
+            return SpoolReclaim(
+                auto_vacuum=self._auto_vacuum,
+                freed_pages=0,
+                wal_truncated=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return SpoolReclaim(
+            auto_vacuum=self._auto_vacuum,
+            freed_pages=freed_pages,
+            wal_truncated=wal_truncated,
+            rewrote_file=True,
+        )
 
     def record_attempt(
         self,
