@@ -394,7 +394,14 @@ class SQLiteSpool:
             raise
         except sqlite3.Error as exc:
             self.close()
-            raise SpoolError("failed to initialize SQLite spool") from exc
+            # Classified like every other storage failure: a disk that is full
+            # or read-only at startup is not a broken spool, and the operator
+            # reading the entry's error should be told which of the two it is.
+            # Unlike a runtime failure it still fails the setup, and Home
+            # Assistant retries the entry (ADR 0015).
+            raise classify_storage_error(
+                exc, "failed to initialize SQLite spool"
+            ) from exc
 
     @property
     def path(self) -> Path:

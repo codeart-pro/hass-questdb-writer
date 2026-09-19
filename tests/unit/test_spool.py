@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -741,6 +742,66 @@ class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
         # A spool that is already closed is a caller mistake, not a crash.
         self.assertIsNotNone(spool.reclaim(max_pages=1).error)
         self.assertIsNotNone(spool.compact().error)
+
+    def test_open_classifies_a_full_database_as_a_storage_error(self) -> None:
+        # A disk that is full when the spool opens is not a broken spool: the
+        # entry has to name the storage condition (ADR 0015) even though it
+        # still fails the setup, which is what makes Home Assistant retry it.
+        source = Path(self.temporary_directory.name) / "full.db"
+        raw = sqlite3.connect(source, isolation_level=None)
+        raw.execute("PRAGMA max_page_count = 8")
+        raw.execute("CREATE TABLE t (x BLOB)")
+        full_error: sqlite3.OperationalError | None = None
+        try:
+            raw.execute("INSERT INTO t VALUES (?)", (b"x" * 60_000,))
+        except sqlite3.OperationalError as exc:
+            full_error = exc
+        raw.close()
+        self.assertIsNotNone(full_error)
+        self.assertEqual(
+            getattr(full_error, "sqlite_errorcode", None), sqlite3.SQLITE_FULL
+        )
+        with patch(
+            "custom_components.hass_questdb_writer.spool.sqlite3.connect",
+            side_effect=full_error,
+        ):
+            with self.assertRaises(SpoolDiskFullError):
+                self.open_spool()
+
+    def test_reclaim_returns_space_to_the_filesystem(self) -> None:
+        # The tests above measure the file; this measures the filesystem - what
+        # the guard reads and what the operator sees - which a mocked usage
+        # source cannot show. The bound is deliberately loose: the filesystem
+        # also accounts for the WAL and for whatever else runs next to it.
+        spool = self.open_spool(
+            max_pending_rows=5_000,
+            max_pending_bytes=10_000_000,
+            max_event_bytes=4_096,
+            max_dead_letter_bytes=10_000_000,
+        )
+        with spool:
+            self._fill_and_deliver(spool, rows=4_000)
+            page_size = spool._db.execute("PRAGMA page_size").fetchone()[0]
+            before = shutil.disk_usage(self.path.parent).free
+            reclaim = spool.reclaim(max_pages=4_096)
+            after = shutil.disk_usage(self.path.parent).free
+        freed_bytes = reclaim.freed_pages * page_size
+        self.assertGreater(freed_bytes, 1_000_000)
+        self.assertGreaterEqual(after - before, freed_bytes // 2)
+
+    def test_the_full_database_recipe_leaves_no_room_for_the_payload(self) -> None:
+        # The recipe is empirical (a small page cap plus a payload that cannot
+        # fit the WAL), so it asserts its own precondition instead of trusting
+        # the SQLite version to behave the same way: SQLite refuses to cap the
+        # database below its current size, so what matters is the room left
+        # between the cap and the pages already in use.
+        with self.open_spool() as spool:
+            spool._db.execute("PRAGMA max_page_count = 8")
+            page_size = spool._db.execute("PRAGMA page_size").fetchone()[0]
+            cap = spool._db.execute("PRAGMA max_page_count").fetchone()[0]
+            pages = spool._db.execute("PRAGMA page_count").fetchone()[0]
+        self.assertGreaterEqual(cap, pages)
+        self.assertLess((cap - pages) * page_size, 60_000)
 
     def _fill_and_deliver(self, spool: SQLiteSpool, *, rows: int) -> None:
         payload = b"x" * 2_011

@@ -99,10 +99,28 @@ class GuardTests(unittest.TestCase):
         self.assertTrue(status.blocked)
 
     def test_equal_free_space_and_reserve_is_not_blocked(self) -> None:
+        # The contract (ADR 0014 §3, restated in ADR 0015): the reserve is the
+        # threshold at which persistence pauses, checked before each durable
+        # write. Equality still allows that write, and the write itself may then
+        # cross the reserve by up to one persist batch - the README says so
+        # explicitly instead of promising an untouched reserve.
         status = self.guard(
             FakeFilesystem(total_bytes=0, free_bytes=512 * 1_024 * 1_024)
         ).check(Path("/config/spool.db"))
         self.assertFalse(status.blocked)
+
+    def test_free_space_one_byte_below_the_reserve_blocks(self) -> None:
+        status = self.guard(
+            FakeFilesystem(total_bytes=0, free_bytes=512 * 1_024 * 1_024 - 1)
+        ).check(Path("/config/spool.db"))
+        self.assertTrue(status.blocked)
+
+    def test_free_space_one_byte_above_the_reserve_is_allowed(self) -> None:
+        status = self.guard(
+            FakeFilesystem(total_bytes=0, free_bytes=512 * 1_024 * 1_024 + 1)
+        ).check(Path("/config/spool.db"))
+        self.assertFalse(status.blocked)
+        self.assertEqual(status.reserve_bytes, 512 * 1_024 * 1_024)
 
     def test_an_unreadable_filesystem_blocks(self) -> None:
         filesystem = FakeFilesystem(error=OSError("Stale file handle"))
