@@ -13,7 +13,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.redact import async_redact_data
 
 from .const import CONF_PASSWORD, DOMAIN
-from .transport import IlpHttpTransport, IlpTransportError
+from .runtime import build_transport, connection_configuration
+from .transport import IlpTransportError
 
 _MANIFEST = json.loads(
     (Path(__file__).parent / "manifest.json").read_text(encoding="utf-8")
@@ -29,14 +30,7 @@ async def _probe_schema(
     Never raises: an unreachable server just yields ``unavailable``.
     """
     data = entry.data
-    transport = IlpHttpTransport(
-        data["host"],
-        data["port"],
-        use_tls=data.get("use_tls", False),
-        timeout_seconds=5.0,
-        username=data.get("username") or None,
-        password=data.get("password") or None,
-    )
+    transport = build_transport(connection_configuration(data, entry.options))
     table = data["table"].replace("'", "''")
     result: dict[str, Any] = {"table": data["table"]}
     try:

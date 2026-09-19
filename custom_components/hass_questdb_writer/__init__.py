@@ -29,18 +29,14 @@ from .const import (
     CONF_DELIVERY_BATCH_ROWS,
     CONF_FLUSH_INTERVAL_SECONDS,
     CONF_FLUSH_ON_SHUTDOWN,
-    CONF_HOST,
-    CONF_HTTP_TIMEOUT_SECONDS,
     CONF_INGRESS_QUEUE_CAPACITY,
     CONF_MAX_DEAD_LETTER_BYTES,
     CONF_MAX_DEAD_LETTER_ROWS,
     CONF_MAX_PENDING_BYTES,
     CONF_MAX_PENDING_ROWS,
     CONF_MAX_SERIALIZED_EVENT_BYTES,
-    CONF_PASSWORD,
     CONF_PERSIST_BATCH_ROWS,
     CONF_PERSIST_IDLE_POLL_SECONDS,
-    CONF_PORT,
     CONF_RETENTION_DAYS,
     CONF_RETRY_INITIAL_SECONDS,
     CONF_RETRY_JITTER_RATIO,
@@ -52,15 +48,11 @@ from .const import (
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
-    CONF_TLS_SELF_SIGNED,
-    CONF_USE_TLS,
-    CONF_USERNAME,
     DOMAIN,
     PROVISIONAL_DELIVERY_BATCH_BYTES,
     PROVISIONAL_DELIVERY_BATCH_ROWS,
     PROVISIONAL_FLUSH_INTERVAL_SECONDS,
     PROVISIONAL_FLUSH_ON_SHUTDOWN,
-    PROVISIONAL_HTTP_TIMEOUT_SECONDS,
     PROVISIONAL_INGRESS_QUEUE_CAPACITY,
     PROVISIONAL_MAX_DEAD_LETTER_BYTES,
     PROVISIONAL_MAX_DEAD_LETTER_ROWS,
@@ -80,10 +72,10 @@ from .const import (
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
 from .runtime import (
-    ConnectionConfiguration,
     HassQuestDbRuntime,
     RuntimeConfiguration,
     SpoolConfiguration,
+    connection_configuration,
 )
 from .worker import (
     WorkerSettings,
@@ -145,17 +137,7 @@ def _runtime_configuration(
                 PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS,
             ),
         ),
-        connection=ConnectionConfiguration(
-            host=data[CONF_HOST],
-            port=data[CONF_PORT],
-            use_tls=data[CONF_USE_TLS],
-            timeout_seconds=options.get(
-                CONF_HTTP_TIMEOUT_SECONDS, PROVISIONAL_HTTP_TIMEOUT_SECONDS
-            ),
-            username=data.get(CONF_USERNAME),
-            password=data.get(CONF_PASSWORD),
-            tls_self_signed=bool(data.get(CONF_TLS_SELF_SIGNED, False)),
-        ),
+        connection=connection_configuration(data, options),
         worker=WorkerSettings(
             ingress_queue_capacity=options.get(
                 CONF_INGRESS_QUEUE_CAPACITY,

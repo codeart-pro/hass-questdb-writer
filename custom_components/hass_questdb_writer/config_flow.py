@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ssl
 from collections.abc import Mapping
 from typing import Any
 
@@ -92,9 +91,13 @@ from .const import (
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
 
+from .runtime import (
+    ConnectionConfiguration,
+    build_transport,
+    connection_configuration,
+)
 from .transport import (
     AuthenticationIlpError,
-    IlpHttpTransport,
     IlpTransportError,
 )
 
@@ -426,25 +429,27 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def _connection_settings(self, data: dict[str, Any]) -> ConnectionConfiguration:
+        """Resolve the connection of an in-progress form.
+
+        Reuses the entry's own options when there is one, so the probe verifies
+        exactly the timeouts and TLS policy the worker will use.
+        """
+        source: config_entries.ConfigEntry | None = None
+        if self.source == SOURCE_RECONFIGURE:
+            source = self._get_reconfigure_entry()
+        elif self.source == SOURCE_REAUTH:
+            source = self._get_reauth_entry()
+        options = dict(source.options) if source is not None else {}
+        return connection_configuration(data, options)
+
     async def _test_connection(self, data: dict[str, Any]) -> None:
         """Probe QuestDB with the given settings; raise on failure.
 
         Uses the same transport and error classification as the worker, so
         the form reports exactly what delivery would experience.
         """
-        transport = IlpHttpTransport(
-            data[CONF_HOST],
-            data[CONF_PORT],
-            use_tls=data[CONF_USE_TLS],
-            timeout_seconds=PROVISIONAL_HTTP_TIMEOUT_SECONDS,
-            username=data.get(CONF_USERNAME) or None,
-            password=data.get(CONF_PASSWORD) or None,
-            ssl_context=(
-                ssl._create_unverified_context()
-                if data.get(CONF_TLS_SELF_SIGNED)
-                else None
-            ),
-        )
+        transport = build_transport(self._connection_settings(data))
         await self.hass.async_add_executor_job(transport.exec_query, "select 1")
 
     def _form_schema(self, values: dict[str, Any]) -> vol.Schema:

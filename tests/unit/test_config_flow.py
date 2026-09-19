@@ -304,6 +304,37 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "already_configured")
         update.assert_not_called()
 
+    async def test_connection_probe_uses_the_entry_options(self) -> None:
+        # The probe is what the UI reports, so it has to verify the same
+        # timeout and TLS policy the worker will use, not a hardcoded default.
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: True,
+                CONF_TLS_SELF_SIGNED: True,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            }
+        )
+        flow._get_reconfigure_entry().options = {CONF_HTTP_TIMEOUT_SECONDS: 7.5}
+        flow.hass.async_add_executor_job = AsyncMock(
+            side_effect=lambda fn, *args: fn(*args)
+        )
+        with patch(
+            "custom_components.hass_questdb_writer.config_flow.build_transport"
+        ) as build:
+            await flow._test_connection(
+                self.user_input(
+                    {CONF_USE_TLS: True, CONF_TLS_SELF_SIGNED: True}
+                )
+            )
+        connection = build.call_args[0][0]
+        self.assertEqual(connection.timeout_seconds, 7.5)
+        self.assertTrue(connection.use_tls)
+        self.assertTrue(connection.tls_self_signed)
+
     async def test_reconfigure_updates_entry_and_keeps_stored_secret(self) -> None:
         flow = self._reconfigure_flow(
             {

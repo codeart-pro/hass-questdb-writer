@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 import datetime as dt
 from functools import partial
@@ -12,7 +12,7 @@ import ssl
 import math
 from pathlib import Path
 import time
-from typing import Final
+from typing import Any, Final
 from uuid import uuid4
 
 from homeassistant.const import EVENT_STATE_CHANGED, STATE_UNKNOWN
@@ -29,7 +29,18 @@ from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.json import json_dumps
 
 from .attribute_filter import AttributeFilter
-from .const import DOMAIN
+from .const import (
+    CONF_HOST,
+    CONF_HTTP_TIMEOUT_SECONDS,
+    CONF_PASSWORD,
+    CONF_PORT,
+    CONF_TABLE,
+    CONF_TLS_SELF_SIGNED,
+    CONF_USE_TLS,
+    CONF_USERNAME,
+    DOMAIN,
+    PROVISIONAL_HTTP_TIMEOUT_SECONDS,
+)
 from .event import EventEnvelope, EventEnvelopeError
 from .schema import IlpSchemaManager
 from .spool import SQLiteSpool
@@ -73,6 +84,42 @@ def _tls_context(
     if connection.tls_self_signed:
         return ssl._create_unverified_context()
     return None
+
+
+def connection_configuration(
+    data: Mapping[str, Any], options: Mapping[str, Any]
+) -> ConnectionConfiguration:
+    """Resolve the QuestDB connection every consumer shares.
+
+    The worker, the table-size sensor, diagnostics and the config flow all read
+    the same entry data and options, so resolving them here is what keeps one
+    timeout and one TLS policy in play instead of a hardcoded timeout in one
+    place and a missing self-signed context in another.
+    """
+    return ConnectionConfiguration(
+        host=data[CONF_HOST],
+        port=data[CONF_PORT],
+        use_tls=bool(data.get(CONF_USE_TLS, False)),
+        timeout_seconds=options.get(
+            CONF_HTTP_TIMEOUT_SECONDS, PROVISIONAL_HTTP_TIMEOUT_SECONDS
+        ),
+        username=data.get(CONF_USERNAME) or None,
+        password=data.get(CONF_PASSWORD) or None,
+        tls_self_signed=bool(data.get(CONF_TLS_SELF_SIGNED, False)),
+    )
+
+
+def build_transport(connection: ConnectionConfiguration) -> IlpHttpTransport:
+    """Build the REST/ILP transport for one connection configuration."""
+    return IlpHttpTransport(
+        connection.host,
+        connection.port,
+        use_tls=connection.use_tls,
+        timeout_seconds=connection.timeout_seconds,
+        username=connection.username,
+        password=connection.password,
+        ssl_context=_tls_context(connection),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,15 +249,7 @@ class HassQuestDbRuntime:
             )
 
         def transport_factory() -> IlpHttpTransport:
-            return IlpHttpTransport(
-                configuration.connection.host,
-                configuration.connection.port,
-                use_tls=configuration.connection.use_tls,
-                timeout_seconds=configuration.connection.timeout_seconds,
-                username=configuration.connection.username,
-                password=configuration.connection.password,
-                ssl_context=_tls_context(configuration.connection),
-            )
+            return build_transport(configuration.connection)
 
         def schema_factory() -> IlpSchemaManager:
             return IlpSchemaManager(

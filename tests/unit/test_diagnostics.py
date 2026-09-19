@@ -94,7 +94,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_password_is_redacted(self) -> None:
         with patch(
-            "custom_components.hass_questdb_writer.diagnostics.IlpHttpTransport"
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
         ):
             result = await async_get_config_entry_diagnostics(
                 self.hass, self.entry
@@ -103,6 +103,26 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             result["entry_data"]["password"], "**REDACTED**"
         )
         self.assertEqual(result["entry_data"]["host"], "questdb")
+
+    async def test_schema_probe_uses_the_connection_settings_of_the_entry(
+        self,
+    ) -> None:
+        # The probe used to hardcode a 5 s timeout and drop the self-signed
+        # flag, so diagnostics disagreed with the worker about the same server.
+        self.entry.data["use_tls"] = True
+        self.entry.data["tls_self_signed"] = True
+        self.entry.options["http_timeout_seconds"] = 7.5
+        with patch(
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": []}
+            )
+            await async_get_config_entry_diagnostics(self.hass, self.entry)
+        kwargs = transport_cls.call_args.kwargs
+        self.assertEqual(kwargs["timeout_seconds"], 7.5)
+        self.assertTrue(kwargs["use_tls"])
+        self.assertIsNotNone(kwargs["ssl_context"])
 
     async def test_structure_contains_runtime_and_schema(self) -> None:
         transport = Mock()
@@ -113,7 +133,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         with patch(
-            "custom_components.hass_questdb_writer.diagnostics.IlpHttpTransport",
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport",
             return_value=transport,
         ):
             result = await async_get_config_entry_diagnostics(
@@ -154,7 +174,7 @@ class DiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         with patch(
-            "custom_components.hass_questdb_writer.diagnostics.IlpHttpTransport",
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport",
             return_value=transport,
         ):
             result = await async_get_config_entry_diagnostics(

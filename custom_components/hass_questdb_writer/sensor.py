@@ -25,17 +25,14 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import (
-    CONF_HOST,
-    CONF_PASSWORD,
-    CONF_PORT,
-    CONF_TABLE,
-    CONF_USE_TLS,
-    CONF_USERNAME,
-    PROVISIONAL_HTTP_TIMEOUT_SECONDS,
-)
+from .const import CONF_TABLE
 from .entity import QuestDbWriterEntity
-from .runtime import HassQuestDbRuntime, RuntimeSnapshot
+from .runtime import (
+    HassQuestDbRuntime,
+    RuntimeSnapshot,
+    build_transport,
+    connection_configuration,
+)
 from .transport import IlpHttpTransport, IlpTransportError
 from .worker import WorkerState
 
@@ -189,6 +186,7 @@ class QuestDbTableSizeSensor(QuestDbWriterEntity):
     def __init__(self, entry: ConfigEntry, table_name: str) -> None:
         super().__init__(entry, "table_size", "Table size")
         self._entry_data = entry.data
+        self._entry_options = entry.options
         self._table = table_name
         self._transport: IlpHttpTransport | None = None
         self._unsub_timer: CALLBACK_TYPE | None = None
@@ -231,13 +229,11 @@ class QuestDbTableSizeSensor(QuestDbWriterEntity):
     async def async_update(self) -> None:
         """Query the table partitions size from QuestDB."""
         if self._transport is None:
-            self._transport = IlpHttpTransport(
-                self._entry_data[CONF_HOST],
-                self._entry_data[CONF_PORT],
-                use_tls=self._entry_data.get(CONF_USE_TLS, False),
-                timeout_seconds=PROVISIONAL_HTTP_TIMEOUT_SECONDS,
-                username=self._entry_data.get(CONF_USERNAME) or None,
-                password=self._entry_data.get(CONF_PASSWORD) or None,
+            # The same connection settings the worker and diagnostics use, so a
+            # self-signed certificate or a tuned timeout cannot make this sensor
+            # the only consumer that fails.
+            self._transport = build_transport(
+                connection_configuration(self._entry_data, self._entry_options)
             )
         try:
             result = await self.hass.async_add_executor_job(
