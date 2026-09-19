@@ -236,8 +236,10 @@ The writer only writes; reading is done with any QuestDB client
 for ingestion, SQL/REST/PGWire for queries):
 
 - **Web Console** (`http://<host>:9000`) for ad-hoc queries,
-- **Grafana** with the QuestDB data source (sample dashboards ship in the
-  dev-stack repository),
+- **Grafana** with the
+  [official QuestDB data source](https://grafana.com/grafana/plugins/questdb-questdb-datasource/) —
+  the panel queries are worked through in [docs/grafana.md](docs/grafana.md), and
+  sample dashboards ship in the dev-stack repository,
 - **Home Assistant's built-in SQL integration** over the PostgreSQL wire
   protocol (`postgresql://admin:quest@questdb:8812/qdb`) to bring values
   into HA states and automations — see the section below,
@@ -286,6 +288,10 @@ SAMPLE BY 1h;
 SELECT count(), size_pretty(sum(diskSize)) AS table_size
 FROM table_partitions('hass');
 ```
+
+These queries are the basis of the Grafana panels; turning them into a panel is
+covered in [docs/grafana.md](docs/grafana.md), with one example reading a value
+from `state` and one reading it out of the `attributes` JSON.
 
 ### Reading inside Home Assistant (SQL integration)
 
