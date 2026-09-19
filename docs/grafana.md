@@ -169,8 +169,12 @@ SAMPLE BY $__sampleByInterval
   4-hour window, 586 raw rows became 4 buckets with `1h` and 46 buckets with `5m`.
   Grafana's own `$__interval` is a Grafana duration string; the plugin documents
   `$__sampleByInterval` for this purpose, so prefer it.
+- Empty buckets are skipped (the documented default) — a rarely reporting sensor
+  shows gaps; `FILL(NULL)`/`FILL(PREV)` fill them, `FROM ... TO` extends past the
+  readings.
 - The aggregate has to be cast for the same reason as above; `avg(CAST(state AS
-  DOUBLE))` with a plain `state` averages text.
+  DOUBLE))` with a plain `state` averages text. Non-numeric states cast to NULL
+  and `AVG` ignores them.
 
 ## Pitfalls, in one list
 
@@ -197,6 +201,8 @@ WHERE entity_id = 'sensor.example_temperature'
   AND state NOT IN ('unavailable', 'unknown')
 ORDER BY last_updated;
 ```
+
+The window is literal UTC: the dashboard's time zone does not move it.
 
 Sample dashboards built on these queries ship in the dev-stack repository (see
 the README); this page documents the queries themselves, so they can be rebuilt

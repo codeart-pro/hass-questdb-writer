@@ -261,6 +261,9 @@ WHERE entity_id = 'sensor.carbon_monoxide'
 LATEST ON last_updated PARTITION BY entity_id;
 ```
 
+The newest stored row — a sensor that stopped reporting shows its last value, not
+a fresh one.
+
 **Events per hour** ([`SAMPLE BY`](https://questdb.com/docs/reference/sql/sample-by/),
 [`dateadd`](https://questdb.com/docs/query/functions/date-time/)):
 
