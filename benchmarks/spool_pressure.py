@@ -283,7 +283,10 @@ def _state_accounting(
 
     Each interval is charged to the state the writer was in when it ended, so a
     window the writer spent in delivery retry cannot be reported as the cost of a
-    storage pause.
+    storage pause. `--sample-seconds` is the resolution of that attribution: a
+    transition inside an interval is counted for the later state, so a residency
+    figure is accurate to one interval per transition - which is why the runs that
+    measure a state pass `--sample-seconds 0.25`.
     """
     accounting: dict[str, dict[str, float]] = {}
     previous: dict[str, Any] | None = None
@@ -550,14 +553,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     cpu_while_blocked = cpu_seconds() - cpu_at_entry
     blocks_while_blocked = blocked.storage_blocks - blocks_at_entry
 
-    # A spool that has to be created while the filesystem is genuinely out of
-    # space: the startup classification this document claims, produced by real
-    # storage instead of a replayed SQLite error. The filler is removed again
-    # before the recovery phase, and the window above is already measured.
-    startup_on_full_filesystem = _startup_probe_on_full_filesystem(
-        modules, spool_dir, args
-    )
-
     # Phase 2: the destination comes back.
     recovery_started = time.monotonic()
     forwarder.open()
@@ -591,10 +586,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     rows_in_questdb: int | None = None
     distinct_delivered: int | None = None
 
-    # The spool is read before the queries so the id sample can exclude the
-    # events the writer is still holding: sampled ids are the ones that have to
-    # be at the destination, so a missing sample is a loss and not a queued
-    # event.
+    # The spool is read before the queries so the id check can exclude the events
+    # the writer is still holding: the verified ids are the ones that have to be
+    # at the destination, so an id missing there is a loss and not a queued event.
     spool_ids: set[str] | None = None
     try:
         connection = sqlite3.connect(db_path)
@@ -686,9 +680,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             writer.writerows(samples)
 
     # The facts that have to hold for at-least-once: every accepted event is
-    # delivered or still durable, no row is stored twice, and a sample of the
-    # accepted ids is really present. A failed reset or a failed query makes the
-    # whole verification invalid rather than silently optimistic.
+    # delivered or still durable, no row is stored twice, and every accepted id
+    # that is not in the spool is really present at the destination. A failed
+    # reset or a failed query makes the whole verification invalid rather than
+    # silently optimistic.
     identity_counts_agree: bool | None = None
     unaccounted_events: int | None = None
     duplicate_rows_in_table: int | None = None
@@ -710,6 +705,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         and duplicate_rows_in_table == 0
         and missing_ids is not None
         and not missing_ids
+    )
+    # The startup probe fills this filesystem to the last byte, so it runs after
+    # every timing above has been measured and recorded: a destructive probe must
+    # not be part of a window whose duration is published.
+    startup_on_full_filesystem = _startup_probe_on_full_filesystem(
+        modules, spool_dir, args
     )
     return {
         "environment": {
@@ -770,6 +771,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "storage_blocks_per_second": round(
                 blocks_while_blocked / blocked_seconds, 1
             ),
+            "new_pauses_in_window": blocks_while_blocked,
             "cpu_seconds": round(cpu_while_blocked, 3),
             "cpu_percent_of_one_core": round(
                 cpu_while_blocked / blocked_seconds * 100, 1
