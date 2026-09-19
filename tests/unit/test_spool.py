@@ -747,6 +747,12 @@ class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
         # A disk that is full when the spool opens is not a broken spool: the
         # entry has to name the storage condition (ADR 0015) even though it
         # still fails the setup, which is what makes Home Assistant retry it.
+        # The error is a real SQLITE_FULL produced by real storage and then
+        # replayed through the open path: `max_page_count` is per connection, so
+        # a fresh connection cannot be pinned, and a filesystem cannot be filled
+        # from a test. The natural occurrence - a spool opened on a filesystem
+        # that really is full - is measured by benchmarks/spool_pressure.py,
+        # which runs in a container with its own tmpfs (`startup_on_full_filesystem`).
         source = Path(self.temporary_directory.name) / "full.db"
         raw = sqlite3.connect(source, isolation_level=None)
         raw.execute("PRAGMA max_page_count = 8")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 import json
@@ -251,15 +252,24 @@ class StorageFailureSpool:
         return getattr(self._inner, name)
 
 
-def _ilp_event_ids(payloads: list[bytes]) -> set[str]:
-    """Event ids carried by the ILP rows the transport was asked to send."""
-    found: set[str] = set()
+def _ilp_event_id_list(payloads: list[bytes]) -> list[str]:
+    """Event ids carried by the ILP rows the transport was asked to send, in order.
+
+    A list, not a set: a re-sent batch has to be visible as the same id appearing
+    twice, which is exactly what a set would hide.
+    """
+    found: list[str] = []
     for payload in payloads:
-        found.update(
+        found.extend(
             match.decode("utf-8", "replace")
             for match in re.findall(rb'event_id="([^"]*)"', payload)
         )
     return found
+
+
+def _ilp_event_ids(payloads: list[bytes]) -> set[str]:
+    """Event ids carried by the ILP rows the transport was asked to send."""
+    return set(_ilp_event_id_list(payloads))
 
 
 class MutableFilesystem:
@@ -1347,26 +1357,38 @@ class WriterServiceTests(unittest.TestCase):
         script = StorageFailureScript()
         script.mark_delivered_error = SpoolDiskFullError("database or disk is full")
         script.mark_delivered_failures = 1
+        transport = ScriptedTransport()
         service = self.service(
-            ScriptedTransport(),
+            transport,
             settings=self.settings(
-                retry_initial_seconds=0.05, retry_max_seconds=0.1
+                retry_initial_seconds=0.05, retry_max_seconds=5.0
             ),
             spool_factory=lambda: StorageFailureSpool(self.open_spool(), script),
         )
         service.start(timeout_seconds=1)
+        started = time.monotonic()
         self.assertTrue(service.submit(self.event(1)))
         self.wait_for(
             lambda: service.snapshot().delivered_events == 1
             and service.snapshot().storage_recoveries == 1,
             timeout=5,
         )
+        # The retry that ends the pause runs on the backoff schedule, not after
+        # the maximum delay: with a 5 s maximum, a writer that waits it out would
+        # still be parked long after the storage recovered.
+        self.assertLess(time.monotonic() - started, 1.0)
         snapshot = service.snapshot()
         self.assertEqual(snapshot.state, WorkerState.RUNNING)
         self.assertEqual(snapshot.delivered_events, 1)
         self.assertEqual(snapshot.storage_blocks, 1)
         self.assertEqual(snapshot.storage_recoveries, 1)
         self.assertGreaterEqual(script.mark_delivered_calls, 2)
+        # The sender side of at-least-once, stated in identity: the batch that
+        # could not be acknowledged was sent again, with the same event id. What
+        # the destination does with the second copy is asserted against the real
+        # QuestDB in tests/integration/test_runtime_questdb.py.
+        sent = Counter(_ilp_event_id_list(transport.payloads))
+        self.assertEqual(sent, Counter({"event-1": 2}))
         service.stop(timeout_seconds=2)
 
     def test_accepted_events_are_delivered_or_durable_by_identity(self) -> None:
@@ -1389,7 +1411,10 @@ class WriterServiceTests(unittest.TestCase):
             for index in range(5)
             if service.submit(self.event(index))
         }
-        self.assertEqual(len(accepted), 2)
+        # How many of the five the worker accepted depends on how fast it drains
+        # the queue, which is why the property below is asserted for whatever was
+        # accepted instead of for a fixed number.
+        self.assertGreaterEqual(len(accepted), 1)
         self.wait_for(
             lambda: service.snapshot().delivered_events == len(accepted),
             timeout=5,
@@ -1402,8 +1427,16 @@ class WriterServiceTests(unittest.TestCase):
                 record.event_id
                 for record in spool.peek_batch(max_rows=100, max_bytes=1_000_000)
             }
-        self.assertEqual(delivered | durable, accepted)
+        # Identity, not cardinality: the same ids, and no id twice in a send.
+        # Re-sends are legitimate after a failed acknowledgement, which is why the
+        # worker-level test below asserts them explicitly instead of forbidding
+        # them in general.
+        self.assertEqual(set(delivered) | durable, accepted)
         self.assertEqual(delivered & durable, set())
+        self.assertEqual(
+            [event_id for event_id, count in Counter(delivered).items() if count > 1],
+            [],
+        )
 
     def test_a_failed_reclamation_keeps_the_pause_without_failing(self) -> None:
         # A pass can fail because the filesystem has no room for the WAL it has

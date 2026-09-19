@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -311,6 +312,96 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
             f"select state from {self.table} where entity_id = '{entity}'"
         )
         self.assertEqual(rows["dataset"], [["on"]])
+
+        # The identity moved with the destination, so a second entry for the same
+        # destination is refused: that is what a unique_id is for, and asserting
+        # it needs a real second flow instead of a comment.
+        second = await self.hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        duplicate = await self.hass.config_entries.flow.async_configure(
+            second["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: moved_table,
+                CONF_USE_TLS: False,
+            },
+        )
+        self.assertEqual(duplicate["type"], "abort")
+        self.assertEqual(duplicate["reason"], "already_configured")
+
+    async def test_a_resend_after_a_failed_local_ack_keeps_one_row(self) -> None:
+        """At-least-once at the sender, one row per state change at the receiver.
+
+        A batch can be sent, then fail to be acknowledged locally, and be sent
+        again. What matters here is what the destination does with the second
+        copy: the table is created with `DEDUP UPSERT KEYS`, so it has to replace
+        the row instead of storing a second one. Without this check "at-least-once
+        with dedup" is a claim about the schema, not a measured outcome.
+        """
+        entity = "input_boolean.questdb_resend"
+        from custom_components.hass_questdb_writer.spool import (
+            SQLiteSpool,
+            SpoolDiskFullError,
+        )
+
+        original_mark_delivered = SQLiteSpool.mark_delivered
+        calls = {"count": 0}
+
+        def flaky_mark_delivered(spool, sequences):  # noqa: ANN001, ANN202
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise SpoolDiskFullError("simulated local acknowledgement failure")
+            return original_mark_delivered(spool, sequences)
+
+        with patch.object(SQLiteSpool, "mark_delivered", flaky_mark_delivered):
+            form = await self.hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": SOURCE_USER}
+            )
+            result = await self.hass.config_entries.flow.async_configure(
+                form["flow_id"],
+                {
+                    CONF_HOST: self.host,
+                    CONF_PORT: self.port,
+                    CONF_TABLE: self.table,
+                    CONF_USE_TLS: False,
+                },
+            )
+            entry = result["result"]
+            self.addAsyncCleanup(self._unload_entry, entry)
+            await self.hass.async_block_till_done()
+
+            self.hass.states.async_set(entity, "on")
+            await self.hass.async_block_till_done()
+            self.assertTrue(
+                await self._wait_for_rows(self.table, entity, "on", timeout=15)
+            )
+            # The first send already put the row in the destination; what has to
+            # happen next is the retry, on the delivery loop's own backoff. The
+            # wait stays inside the patch, so the injected failure is still in
+            # force while the worker works through it.
+            deadline = time.monotonic() + 15
+            while calls["count"] < 2 and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+            self.assertGreaterEqual(
+                calls["count"], 2, "no delivery retry within 15 s"
+            )
+            # The pause the failed acknowledgement opened ends with it, without
+            # any new ingress.
+            await self.hass.async_block_till_done()
+
+        # One physical row and one distinct event id for that state change: the
+        # second send replaced it instead of storing a copy.
+        rows = self.sql(
+            f"select count() from {self.table} where entity_id = '{entity}'"
+        )
+        distinct = self.sql(
+            f"select count_distinct(event_id) from {self.table} "
+            f"where entity_id = '{entity}'"
+        )
+        self.assertEqual(rows["dataset"][0][0], 1)
+        self.assertEqual(distinct["dataset"][0][0], 1)
 
     async def _wait_for_rows(
         self,

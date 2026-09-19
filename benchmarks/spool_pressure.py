@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -45,6 +46,7 @@ import select
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -72,9 +74,9 @@ _MEASURED_MODULES = (
 _PAYLOAD_SAMPLE_EVERY = 200
 
 # How many accepted ids are checked for actual presence at the destination. The
-# enumeration of every id would return a response the transport refuses, so the
-# identity oracle aggregates on the server and spot-checks membership.
-_SAMPLE_IDS = 200
+# enumeration of every id in one query returns a response the transport refuses,
+# so membership is checked in chunks and aggregated on the server.
+_IDS_PER_QUERY = 300
 
 
 def load_component(component_dir: Path | None = None) -> dict[str, Any]:
@@ -204,6 +206,7 @@ class Sampler(threading.Thread):
         wal_bytes = _size_of(self._wal_path)
         return {
             "t": round(time.monotonic() - self._started_at, 3),
+            "monotonic_seconds": round(time.monotonic(), 3),
             "state": snapshot.state.value,
             "pending_rows": snapshot.pending_rows,
             "pending_bytes": snapshot.pending_bytes,
@@ -235,6 +238,128 @@ def _size_of(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _digest(path: Path) -> str:
+    """Short content hash of a file, so a result names the code that produced it."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return "unavailable"
+
+
+def _git_state(directory: Path) -> dict[str, Any]:
+    """Revision and dirty flag of a checkout, for the provenance of a run."""
+
+    def git(*arguments: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(directory), *arguments],
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return ""
+        return completed.stdout.strip()
+
+    return {
+        "path": str(directory),
+        "revision": git("rev-parse", "HEAD") or None,
+        "dirty": bool(git("status", "--porcelain")),
+    }
+
+
+def _state_accounting(
+    samples: list[dict[str, Any]], *, since: float, until: float
+) -> dict[str, dict[str, float]]:
+    """Seconds and CPU seconds per writer state inside a monotonic time window.
+
+    Each interval is charged to the state the writer was in when it ended, so a
+    window the writer spent in delivery retry cannot be reported as the cost of a
+    storage pause.
+    """
+    accounting: dict[str, dict[str, float]] = {}
+    previous: dict[str, Any] | None = None
+    for sample in samples:
+        stamp = sample["monotonic_seconds"]
+        if stamp < since or stamp > until:
+            previous = None
+            continue
+        if previous is not None:
+            entry = accounting.setdefault(
+                sample["state"], {"seconds": 0.0, "cpu_seconds": 0.0}
+            )
+            entry["seconds"] += stamp - previous["monotonic_seconds"]
+            entry["cpu_seconds"] += sample["cpu_seconds"] - previous["cpu_seconds"]
+        previous = sample
+    return {
+        state: {
+            "seconds": round(values["seconds"], 3),
+            "cpu_seconds": round(values["cpu_seconds"], 3),
+            "cpu_percent_of_one_core": round(
+                values["cpu_seconds"] / values["seconds"] * 100, 1
+            )
+            if values["seconds"]
+            else None,
+        }
+        for state, values in accounting.items()
+    }
+
+
+def _startup_probe_on_full_filesystem(
+    modules: dict[str, Any], spool_dir: Path, args: argparse.Namespace
+) -> dict[str, Any]:
+    """Open a fresh spool while the filesystem has no space, and report what it says.
+
+    The guard keeps the writer's own reserve, so the filesystem is not actually
+    full until a filler file consumes the rest. The filler is removed in a
+    `finally`, so the probe cannot change the run it is part of.
+    """
+    filler = spool_dir / "startup-filler.bin"
+    filler_bytes = 0
+    fill_error: str | None = None
+    try:
+        try:
+            with filler.open("wb") as handle:
+                while shutil.disk_usage(spool_dir).free > 64 * 1024:
+                    handle.write(b"\0" * (256 * 1024))
+                    filler_bytes += 256 * 1024
+        except OSError as exc:
+            # The filesystem refused the write: it is as full as it can get, and
+            # that is the condition this probe exists for, not a failure of the
+            # probe.
+            fill_error = f"{type(exc).__name__}: {exc}"
+        free_bytes = shutil.disk_usage(spool_dir).free
+        probe_path = spool_dir / "startup-probe.db"
+        try:
+            spool = modules["spool"].SQLiteSpool(
+                probe_path,
+                max_pending_rows=args.max_pending_rows,
+                max_pending_bytes=args.max_pending_bytes,
+                max_event_bytes=64 * 1024,
+                max_dead_letter_rows=1_000,
+                max_dead_letter_bytes=16 * 1024 * 1024,
+                busy_timeout_seconds=args.timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - the classification is the result
+            return {
+                "raised": type(exc).__name__,
+                "message": str(exc)[:200],
+                "filler_bytes": filler_bytes,
+                "fill_error": fill_error,
+                "free_bytes": free_bytes,
+            }
+        spool.close()
+        return {
+            "raised": None,
+            "filler_bytes": filler_bytes,
+            "fill_error": fill_error,
+            "free_bytes": free_bytes,
+            "note": "the spool opened on a filesystem this probe could not fill",
+        }
+    finally:
+        with contextlib.suppress(OSError):
+            filler.unlink()
 
 
 def _reset_table(
@@ -397,7 +522,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             break
         time.sleep(0.005)
     outage_seconds = time.monotonic() - outage_started
-    blocked = service.snapshot()
+    # The block is reported from the moment it was detected, not from the end of
+    # the window: the state after ten seconds of waiting says nothing about what
+    # tripped the guard.
+    blocked_at_detection = service.snapshot()
     time.sleep(args.settle_seconds)
 
     # Phase 1b: the steady blocked state. This is what an installation sitting on
@@ -414,6 +542,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     blocked = service.snapshot()
     cpu_while_blocked = cpu_seconds() - cpu_at_entry
     blocks_while_blocked = blocked.storage_blocks - blocks_at_entry
+
+    # A spool that has to be created while the filesystem is genuinely out of
+    # space: the startup classification this document claims, produced by real
+    # storage instead of a replayed SQLite error. The filler is removed again
+    # before the recovery phase, and the window above is already measured.
+    startup_on_full_filesystem = _startup_probe_on_full_filesystem(
+        modules, spool_dir, args
+    )
 
     # Phase 2: the destination comes back.
     recovery_started = time.monotonic()
@@ -447,7 +583,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     verification_error: str | None = None
     rows_in_questdb: int | None = None
     distinct_delivered: int | None = None
-    sampled_present: int | None = None
 
     # The spool is read before the queries so the id sample can exclude the
     # events the writer is still holding: sampled ids are the ones that have to
@@ -466,9 +601,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     except sqlite3.Error as exc:
         verification_error = f"{type(exc).__name__}: {exc}"
     verifiable_ids = sorted(accepted_ids - (spool_ids or set()))
-    sample_ids = verifiable_ids[:: max(1, len(verifiable_ids) // _SAMPLE_IDS)][
-        :_SAMPLE_IDS
-    ]
+    missing_ids: list[str] | None = None
     transport = modules["transport"].IlpHttpTransport(
         args.questdb_host, args.questdb_port, **transport_kwargs
     )
@@ -482,13 +615,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"select count_distinct(event_id) from {args.table}"
         )
         distinct_delivered = int(distinct["dataset"][0][0])
-        if sample_ids:
-            quoted = ", ".join(f"'{event_id}'" for event_id in sample_ids)
-            sample = transport.exec_query(
+        # Membership of *every* verifiable id, in chunks: a single query with
+        # 13,000 ids returns a response the transport refuses, but a chunked
+        # membership check is the full set difference, not a sample of it.
+        missing_ids = []
+        for start in range(0, len(verifiable_ids), _IDS_PER_QUERY):
+            chunk = verifiable_ids[start : start + _IDS_PER_QUERY]
+            quoted = ", ".join(f"'{event_id}'" for event_id in chunk)
+            present = transport.exec_query(
                 f"select count_distinct(event_id) from {args.table} "
                 f"where event_id in ({quoted})"
             )
-            sampled_present = int(sample["dataset"][0][0])
+            if int(present["dataset"][0][0]) == len(chunk):
+                continue
+            rows = transport.exec_query(
+                f"select distinct event_id from {args.table} "
+                f"where event_id in ({quoted})"
+            )
+            arrived = {str(row[0]) for row in rows["dataset"]}
+            missing_ids.extend(event_id for event_id in chunk if event_id not in arrived)
     except Exception as exc:  # noqa: BLE001 - reported as a verification failure
         verification_error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -504,6 +649,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     usage_after = shutil.disk_usage(spool_dir)
     peak = max(samples, key=lambda s: s["disk_bytes"]) if samples else None
     min_free = min((s["fs_free_bytes"] for s in samples), default=usage_after.free)
+    # What the writer actually did during the window each measurement claims to
+    # describe: state-seconds and CPU-seconds, not an assumption about the state.
+    state_window = _state_accounting(
+        samples, since=blocked_started, until=blocked_started + blocked_seconds
+    )
+    state_run = _state_accounting(samples, since=0.0, until=float("inf"))
 
     ratio_bytes_per_pending_byte = None
     ratio_bytes_per_row = None
@@ -534,7 +685,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     identity_counts_agree: bool | None = None
     unaccounted_events: int | None = None
     duplicate_rows_in_table: int | None = None
-    sample_missing: int | None = None
     if distinct_delivered is not None and spool_ids is not None:
         identity_counts_agree = (
             distinct_delivered + len(spool_ids) == final.persisted_events
@@ -544,8 +694,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
         if rows_in_questdb is not None:
             duplicate_rows_in_table = rows_in_questdb - distinct_delivered
-        if sampled_present is not None:
-            sample_missing = len(sample_ids) - sampled_present
     nothing_lost = (
         reset_error is None
         and verification_error is None
@@ -553,8 +701,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         and identity_counts_agree is True
         and unaccounted_events == 0
         and duplicate_rows_in_table == 0
-        and sample_missing is not None
-        and sample_missing <= unaccounted_events
+        and missing_ids is not None
+        and not missing_ids
     )
     return {
         "environment": {
@@ -562,6 +710,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "platform": f"{platform.system()}-{platform.machine()}",
             "spool_dir": str(spool_dir),
             "samples_csv": str(samples_path),
+            # Provenance, so a baseline/fixed comparison is auditable from the
+            # result file alone instead of relying on the reader's trust.
+            "harness_sha256": _digest(Path(__file__)),
+            "harness_revision": _git_state(Path(__file__).resolve().parent.parent),
+            "component_revision": _git_state(
+                (component_dir or COMPONENT).resolve().parent.parent
+            ),
+            "arguments": vars(args),
         },
         "parameters": {
             "event_rate_per_second": args.event_rate,
@@ -589,12 +745,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "submitted_events": counters["submitted"],
             "overflowed_events_dropped_at_ingress": counters["overflowed"],
             "block_reason": block_reason,
-            "state_at_block": blocked.state.value,
-            "pending_rows_at_block": blocked.pending_rows,
-            "pending_bytes_at_block": blocked.pending_bytes,
-            "storage_blocks": blocked.storage_blocks,
-            "retry_attempts": blocked.retry_attempts,
-            "last_error": blocked.last_error,
+            "state_at_block": blocked_at_detection.state.value,
+            "pending_rows_at_block": blocked_at_detection.pending_rows,
+            "pending_bytes_at_block": blocked_at_detection.pending_bytes,
+            "storage_blocks": blocked_at_detection.storage_blocks,
+            "retry_attempts": blocked_at_detection.retry_attempts,
+            "last_error": blocked_at_detection.last_error,
             "samples_collected": len(samples),
         },
         "blocked_steady_state": {
@@ -608,7 +764,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "cpu_percent_of_one_core": round(
                 cpu_while_blocked / blocked_seconds * 100, 1
             ),
-            "state": blocked.state.value,
+            # The window is not necessarily a blocked window: at a low offered
+            # rate the writer can spend it in delivery retry instead, and the CPU
+            # of that state must not be reported as the cost of a pause.
+            "state_at_window_end": blocked.state.value,
+            "state_seconds": state_window,
+            "blocked_seconds_in_window": round(
+                state_window.get("blocked", {}).get("seconds", 0.0), 3
+            ),
+            "cpu_seconds_in_blocked_state": state_window.get("blocked", {}).get(
+                "cpu_seconds"
+            ),
         },
         "disk_cost": {
             "db_bytes_peak": peak["db_bytes"] if peak else None,
@@ -626,9 +792,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "counts_agree": identity_counts_agree,
             "duplicate_rows_in_table": duplicate_rows_in_table,
             "raw_rows_in_questdb": rows_in_questdb,
-            "sampled_ids": len(sample_ids),
-            "sample_missing": sample_missing,
+            "verified_ids": len(verifiable_ids),
+            "missing_events": None if missing_ids is None else len(missing_ids),
         },
+        "writer_states": state_run,
+        "startup_on_full_filesystem": startup_on_full_filesystem,
         "payload": {
             "requested_bytes": args.payload_bytes,
             "samples": len(payload_sizes),
@@ -646,12 +814,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "recovery": {
             "seconds_to_drain": round(recovery_seconds, 3),
-            "drained": drained,
+            # Two different moments, named so they cannot be confused: the drain
+            # observed before the writer was asked to stop, and the state of the
+            # spool afterwards, which the shutdown flush may still change.
+            "drained_before_shutdown": drained,
+            "drained_after_shutdown": spool_ids is not None and not spool_ids,
             "delivered_events": recovered.delivered_events,
             "dead_lettered_events": final.dead_lettered_events,
             "storage_recoveries": recovered.storage_recoveries,
             "rows_in_questdb": rows_in_questdb,
             "rows_still_in_spool": final.pending_rows,
+            "rows_still_in_spool_after_shutdown": None
+            if spool_ids is None
+            else len(spool_ids),
             "final_persisted_events": final.persisted_events,
             "final_db_bytes": final_db,
             "final_wal_bytes": final_wal,

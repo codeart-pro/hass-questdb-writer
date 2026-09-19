@@ -47,21 +47,45 @@ MUTATIONS = [
 
 
 def main() -> None:
-    for name, needle, replacement, selection in MUTATIONS:
-        mutated = ORIGINAL.replace(needle, replacement, 1)
-        if mutated == ORIGINAL:
-            print(f"{name}: SKIPPED (anchor not found)")
-            continue
-        FLOW.write_text(mutated)
-        result = subprocess.run(
-            ["python3", "-m", "pytest", *selection, "-q", "--no-header"],
-            cwd=TREE, capture_output=True, text=True,
-        )
-        summary = (result.stdout.strip().splitlines() or ["<no output>"])[-1]
-        verdict = "CAUGHT (red)" if result.returncode != 0 else "MISSED (still green!)"
-        print(f"{name}: {verdict} :: {summary}")
+    try:
+        for name, needle, replacement, selection in MUTATIONS:
+            mutated = ORIGINAL.replace(needle, replacement, 1)
+            if mutated == ORIGINAL:
+                print(f"{name}: SKIPPED (anchor not found)")
+                continue
+            FLOW.write_text(mutated)
+            result = subprocess.run(
+                ["python3", "-m", "pytest", *selection, "-q", "--no-header"],
+                cwd=TREE, capture_output=True, text=True,
+            )
+            print(f"{name}: {_verdict(result)} :: {_summary(result.stdout)}")
+    finally:
+        # The original text is restored from memory in a `finally`, so an
+        # interrupt in the middle of a mutation cannot leave the tree mutated.
         FLOW.write_text(ORIGINAL)
-    print("config_flow.py restored:", FLOW.read_text() == ORIGINAL)
+        print("config_flow.py restored:", FLOW.read_text() == ORIGINAL)
+
+
+def _summary(output: str) -> str:
+    return (output.strip().splitlines() or ["<no output>"])[-1]
+
+
+def _verdict(result: subprocess.CompletedProcess[str]) -> str:
+    """CAUGHT only when the selected tests ran and failed.
+
+    A non-zero exit code is not enough: an import error, a collection error or a
+    wrong test path exits non-zero without a single assertion having run, which
+    would report an infrastructure failure as a killed mutant.
+    """
+    summary = _summary(result.stdout + result.stderr).lower()
+    if result.returncode == 0:
+        return "MISSED (still green!)"
+    infrastructure_markers = ("error", "no tests ran", "usage error", "interrupted")
+    if any(marker in summary for marker in infrastructure_markers):
+        return "UNDECIDED (infrastructure failure, not a killed mutant)"
+    if "failed" in summary:
+        return "CAUGHT (red)"
+    return "UNDECIDED (unrecognised outcome)"
 
 
 if __name__ == "__main__":

@@ -1050,9 +1050,12 @@ class WriterService:
                     self._block_on_storage(
                         _storage_block_reason(exc), _error_text(exc)
                     )
-                    retry_at = (
-                        self._monotonic() + self._settings.retry_max_seconds
-                    )
+                    # Retry on the backoff schedule, not after the maximum delay:
+                    # the successful retry is itself what ends the pause
+                    # (`_resume_after_storage_block`), and waiting out
+                    # `retry_max_seconds` would leave the writer parked long after
+                    # the storage recovered.
+                    retry_at = self._monotonic() + backoff.next_delay()
                     continue
                 stats = spool.stats()
                 self._set_spool_stats(stats)
@@ -1330,11 +1333,13 @@ class WriterService:
 
         spool.mark_delivered(sequences)
         backoff.reset()
-        # A durable write on the delivery side proves the same storage is
-        # writable again, so it closes an open pause as well. Without this a
-        # pause opened by a delivery-side storage failure stays counted as open
-        # (and blocks the one rewrite per pause) until new ingress happens to be
-        # persisted, while delivery is already running normally.
+        # A successful write on the delivery side means the spool accepted a
+        # write again, so it closes an open pause as well. It is not a promise
+        # that the next persist batch fits - the guard still checks free space
+        # before every write and may pause again immediately - but leaving the
+        # pause open would be worse: it stays counted as open (and keeps the one
+        # rewrite per pause consumed) while delivery is already running normally.
+        # Without this, only a successful ingress persist could end it.
         self._resume_after_storage_block()
         with self._lock:
             self._delivered_events += len(sequences)

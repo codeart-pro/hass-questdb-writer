@@ -2,11 +2,18 @@
 
 Each script copies nothing and changes nothing permanently: it edits one file of
 the package inside the container's test tree, runs a focused test selection, and
-restores the file. A mutation that leaves the tests green means the test does not
-protect the behaviour it claims to protect.
+restores the file in a `finally`, so an interrupted run still leaves the tree as
+it was.
+
+A mutation counts as caught only when the selected tests actually ran and failed
+(`1 failed, N deselected`). A non-zero exit code alone is not enough: an import
+error or a wrong test path exits non-zero with nothing asserted, and the checker
+reports that as `UNDECIDED`, not as a killed mutant. A mutant that leaves the
+tests green is reported as `MISSED`.
 
 They exist because a test that cannot fail is not evidence, and because the ADRs
-point at them when they claim "N mutations of this fix turn the new tests red".
+point at them when they claim "these mutations of this fix turn the new tests
+red".
 
 ## Running one
 
