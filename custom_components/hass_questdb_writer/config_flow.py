@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ssl
 from collections.abc import Mapping
 from typing import Any
 
@@ -57,6 +56,8 @@ from .const import (
     CONF_RETRY_MULTIPLIER,
     CONF_SHOW_ADVANCED,
     CONF_SQLITE_BUSY_TIMEOUT_SECONDS,
+    CONF_SPOOL_MIN_FREE_BYTES,
+    CONF_SPOOL_MIN_FREE_RATIO,
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
@@ -84,13 +85,19 @@ from .const import (
     PROVISIONAL_RETRY_MAX_SECONDS,
     PROVISIONAL_RETRY_MULTIPLIER,
     PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS,
+    PROVISIONAL_SPOOL_MIN_FREE_BYTES,
+    PROVISIONAL_SPOOL_MIN_FREE_RATIO,
     PROVISIONAL_START_TIMEOUT_SECONDS,
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
 
+from .runtime import (
+    ConnectionConfiguration,
+    build_transport,
+    connection_configuration,
+)
 from .transport import (
     AuthenticationIlpError,
-    IlpHttpTransport,
     IlpTransportError,
 )
 
@@ -160,6 +167,26 @@ def _user_schema(values: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_PASSWORD, default=values.get(CONF_PASSWORD) or ""
             ): str,
+        }
+    )
+
+
+def _connection_unique_id(data: dict[str, Any]) -> str:
+    """The destination identity of one connection configuration."""
+    scheme = "https" if data[CONF_USE_TLS] else "http"
+    return f"{scheme}://{data[CONF_HOST].lower()}:{data[CONF_PORT]}/{data[CONF_TABLE]}"
+
+
+def _reauth_schema(username: str | None) -> vol.Schema:
+    """The credentials-only form used by reauthentication (ADR-0012).
+
+    Host, port and table are deliberately absent: reauth repairs credentials,
+    and moving an entry to another destination is what Reconfigure is for.
+    """
+    return vol.Schema(
+        {
+            vol.Optional(CONF_USERNAME, default=username or ""): str,
+            vol.Optional(CONF_PASSWORD, default=""): str,
         }
     )
 
@@ -346,6 +373,18 @@ def _advanced_schema(options: dict[str, Any]) -> vol.Schema:
                 default=get(CONF_MAX_DEAD_LETTER_BYTES, PROVISIONAL_MAX_DEAD_LETTER_BYTES),
             ): _number(65_536, 268_435_456, 65_536),
             vol.Optional(
+                CONF_SPOOL_MIN_FREE_BYTES,
+                default=get(
+                    CONF_SPOOL_MIN_FREE_BYTES, PROVISIONAL_SPOOL_MIN_FREE_BYTES
+                ),
+            ): _number(0, 1_073_741_824, 1_048_576),
+            vol.Optional(
+                CONF_SPOOL_MIN_FREE_RATIO,
+                default=get(
+                    CONF_SPOOL_MIN_FREE_RATIO, PROVISIONAL_SPOOL_MIN_FREE_RATIO
+                ),
+            ): _number(0, 0.5, 0.01),
+            vol.Optional(
                 CONF_RETENTION_DAYS,
                 default=str(get(CONF_RETENTION_DAYS, 0)),
             ): vol.All(
@@ -390,33 +429,46 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def _connection_settings(self, data: dict[str, Any]) -> ConnectionConfiguration:
+        """Resolve the connection of an in-progress form.
+
+        Reuses the entry's own options when there is one, so the probe verifies
+        exactly the timeouts and TLS policy the worker will use.
+        """
+        source: config_entries.ConfigEntry | None = None
+        if self.source == SOURCE_RECONFIGURE:
+            source = self._get_reconfigure_entry()
+        elif self.source == SOURCE_REAUTH:
+            source = self._get_reauth_entry()
+        options = dict(source.options) if source is not None else {}
+        return connection_configuration(data, options)
+
     async def _test_connection(self, data: dict[str, Any]) -> None:
         """Probe QuestDB with the given settings; raise on failure.
 
         Uses the same transport and error classification as the worker, so
         the form reports exactly what delivery would experience.
         """
-        transport = IlpHttpTransport(
-            data[CONF_HOST],
-            data[CONF_PORT],
-            use_tls=data[CONF_USE_TLS],
-            timeout_seconds=PROVISIONAL_HTTP_TIMEOUT_SECONDS,
-            username=data.get(CONF_USERNAME) or None,
-            password=data.get(CONF_PASSWORD) or None,
-            ssl_context=(
-                ssl._create_unverified_context()
-                if data.get(CONF_TLS_SELF_SIGNED)
-                else None
-            ),
-        )
+        transport = build_transport(self._connection_settings(data))
         await self.hass.async_add_executor_job(transport.exec_query, "select 1")
+
+    def _form_schema(self, values: dict[str, Any]) -> vol.Schema:
+        """The form schema for the current step.
+
+        Reauthentication repairs credentials only (ADR-0012), so it shows the
+        credentials and nothing else; every other source shows the full
+        connection form.
+        """
+        if self.source == SOURCE_REAUTH:
+            return _reauth_schema(values.get(CONF_USERNAME))
+        return _user_schema(values)
 
     def _reject(
         self, step_id: str, user_input: dict[str, Any], error: str
     ) -> config_entries.ConfigFlowResult:
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_user_schema(user_input),
+            data_schema=self._form_schema(user_input),
             errors={"base": error},
         )
 
@@ -458,6 +510,15 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         elif self.source == SOURCE_REAUTH:
             source_entry = self._get_reauth_entry()
         if user_input is not None:
+            if self.source == SOURCE_REAUTH and source_entry is not None:
+                # Reauthentication repairs credentials only (ADR-0012): the
+                # destination comes from the entry, so neither the form nor a
+                # hand-made submit can move the writer to another host or table.
+                user_input = {
+                    **source_entry.data,
+                    CONF_USERNAME: user_input.get(CONF_USERNAME, ""),
+                    CONF_PASSWORD: user_input.get(CONF_PASSWORD, ""),
+                }
             host = user_input[CONF_HOST].strip()
             table = user_input[CONF_TABLE].strip()
             username = (user_input.get(CONF_USERNAME) or "").strip() or None
@@ -473,13 +534,13 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not host or not table or len(table.encode("utf-8")) > 127:
                 return self.async_show_form(
                     step_id=step_id,
-                    data_schema=_user_schema(user_input),
+                    data_schema=self._form_schema(user_input),
                     errors={"base": "invalid_connection"},
                 )
             if bool(username) != bool(password):
                 return self.async_show_form(
                     step_id=step_id,
-                    data_schema=_user_schema(user_input),
+                    data_schema=self._form_schema(user_input),
                     errors={"base": "invalid_auth_pair"},
                 )
             new_data = {
@@ -502,14 +563,30 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data=new_data,
                         reason="reauth_successful",
                     )
+                unique_id = _connection_unique_id(new_data)
+                if unique_id != source_entry.unique_id:
+                    # The entry moved to another destination, so its identity has
+                    # to move with it - otherwise a second entry could be added
+                    # for that destination while this one still claims the old
+                    # one, and unique-config-entry would quietly stop holding.
+                    if any(
+                        entry.unique_id == unique_id
+                        for entry in self.hass.config_entries.async_entries(
+                            self.handler
+                        )
+                        if entry.entry_id != source_entry.entry_id
+                    ):
+                        return self.async_abort(reason="already_configured")
+                    return self.async_update_reload_and_abort(
+                        source_entry,
+                        data=new_data,
+                        unique_id=unique_id,
+                    )
                 return self.async_update_reload_and_abort(
                     source_entry,
                     data=new_data,
                 )
-            scheme = "https" if user_input[CONF_USE_TLS] else "http"
-            await self.async_set_unique_id(
-                f"{scheme}://{host.lower()}:{user_input[CONF_PORT]}/{table}"
-            )
+            await self.async_set_unique_id(_connection_unique_id(new_data))
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
                 title=f"QuestDB at {host}",
@@ -522,7 +599,7 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else {}
         )
         return self.async_show_form(
-            step_id=step_id, data_schema=_user_schema(defaults)
+            step_id=step_id, data_schema=self._form_schema(defaults)
         )
 
     @staticmethod
@@ -609,7 +686,13 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                     step_id="advanced",
                     data_schema=_advanced_schema(self._entry.options),
                 )
-            return self.async_create_entry(title="", data=self._filter_options)
+            # One options flow owns entry.options as a whole, so a filter-only
+            # edit must carry every value the advanced step stored earlier;
+            # writing the filter keys alone would reset the tuning knobs to the
+            # PROVISIONAL_* defaults on the next reload.
+            return self.async_create_entry(
+                title="", data={**self._entry.options, **self._filter_options}
+            )
         domain_options = await _domain_selector_options(self.hass)
         return self.async_show_form(
             step_id="init",
@@ -641,7 +724,7 @@ class HassQuestDbWriterOptionsFlow(config_entries.OptionsFlow):
                 )
             return self.async_create_entry(
                 title="",
-                data={**self._filter_options, **values},
+                data={**self._entry.options, **self._filter_options, **values},
             )
         return self.async_show_form(
             step_id="advanced",

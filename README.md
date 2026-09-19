@@ -1,6 +1,6 @@
 # HASS QuestDB Writer
 
-[![Validate](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml) [![Release](https://img.shields.io/github/v/release/codeart-pro/hass-questdb-writer?sort=semver)](https://github.com/codeart-pro/hass-questdb-writer/releases)
+[![Validate](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/validate.yml) [![Tests](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/codeart-pro/hass-questdb-writer/actions/workflows/tests.yml) [![Release](https://img.shields.io/github/v/release/codeart-pro/hass-questdb-writer?sort=semver)](https://github.com/codeart-pro/hass-questdb-writer/releases)
 
 Stream every Home Assistant state change into
 [QuestDB](https://questdb.com/) — durable, at-least-once, with server-side
@@ -13,12 +13,17 @@ ILP/HTTP. No native QuestDB client dependency, no C extensions.
 ## Features
 
 - **Durable spool first**: events land in a local SQLite spool (WAL,
-  `synchronous=FULL`) before anything touches the network, so a QuestDB
-  outage never loses data. Delivery retries with exponential backoff.
-- **Exactly-once semantics**: at-least-once delivery from the durable spool
-  plus QuestDB server-side dedup
-  (`DEDUP UPSERT KEYS(last_updated, entity_id)`) makes replays and
-  restarts no-ops.
+  `synchronous=FULL`) before anything touches the network, so an outage does not
+  lose accepted data while the spool has room. Delivery retries with
+  exponential backoff; the capacity bounds and what happens at the limit are in
+  [ADR 0014](docs/decisions/0014-spool-pressure-policy.md).
+- **Idempotent replays**: delivery from the durable spool is at-least-once, and
+  `DEDUP UPSERT KEYS(last_updated, entity_id)` collapses a repeated row into the
+  same record, so retries, restarts and an uncertain acknowledgement do not
+  duplicate data. This is idempotent upsert under that key, not end-to-end
+  exactly-once: two *different* state changes carrying the same
+  `(last_updated, entity_id)` collapse into one row, and the key's uniqueness is
+  an assumption about Home Assistant semantics ([ADR 0005](docs/decisions/0005-questdb-record-format.md)).
 - **Owned schema**: the integration creates and strictly validates its table
   (`TIMESTAMP(last_updated) PARTITION BY DAY WAL DEDUP UPSERT KEYS(...)`);
   delivery is gated until the schema check passes.
@@ -147,6 +152,8 @@ benchmarks settle them; they can be left untouched.
 | **Max pending bytes** | `67108864` (64 MiB) | 1 MiB–1 GiB | SQLite spool capacity (bytes) |
 | **Max dead-letter rows** | `1000` | 10–1000000 | ring buffer of undeliverable events (FIFO eviction) |
 | **Max dead-letter bytes** | `16777216` (16 MiB) | 64 KiB–256 MiB | dead-letter capacity (bytes) |
+| **Min free disk space (bytes)** | `536870912` (512 MiB) | 0–1 GiB | free space the writer keeps untouched on the filesystem that holds the spool, so SQLite pages, the WAL, the recorder and backups never lose the last of the disk to the writer; `0` disables the floor ([ADR 0014](docs/decisions/0014-spool-pressure-policy.md)) |
+| **Min free disk space (ratio)** | `0.05` | 0–0.5 | the same reserve as a share of the filesystem; the larger of the two wins, so small disks are protected by the floor and large ones by the share |
 | **SQLite busy timeout (s)** | `1.0` | 0.05–30 | retry window for spool lock contention |
 | **HTTP timeout (s)** | `10` | 1–120 | per-request timeout for REST/schema and ILP POST |
 | **Start timeout (s)** | `10` | 1–120 | how long setup waits for the worker thread |
@@ -205,9 +212,21 @@ SQLite spool (at-least-once, bounded):
   dead-letter, tunable in **Configure → Show advanced settings**
   (see [Options](#options) above); at a typical 100–500 events/min
   that covers roughly 3–17 h of downtime
-- **Full spool**: new events are dropped, counted in
-  `overflow_events` (visible in diagnostics); the writer keeps retrying
-  and delivers everything buffered once QuestDB is back
+- **Full spool or full disk**: persistence pauses instead of the writer dying -
+  the state becomes `blocked` and diagnostics name the reason (`spool_full`,
+  `disk_space`, `disk_full` or `readonly`). Accepted events stay queued, the
+  writer keeps retrying and resumes by itself once QuestDB is back or storage
+  recovers - including when the spool is what filled the disk: it returns the
+  pages of already delivered rows and truncates its WAL while the reserve is
+  consumed ([ADR 0015](docs/decisions/0015-spool-space-reclamation.md)). Only
+  events that no longer fit the in-memory queue are dropped, counted
+  in `overflowed_events`. The writer also keeps a free-space reserve
+  (`Min free disk space` options below) and pauses instead of writing into it, so
+  the recorder, logs and backups are not the ones that lose the last of the disk
+  to the spool. The reserve is a pause threshold checked before every durable
+  write, not an untouched buffer: one write may cross it by up to one persist
+  batch before the next check stops the writer
+  ([ADR 0014](docs/decisions/0014-spool-pressure-policy.md))
 - **Logs**: rate-limited retry warnings (1st, 2nd, 4th… attempt), no spam
 
 ## Reading the data
@@ -217,8 +236,10 @@ The writer only writes; reading is done with any QuestDB client
 for ingestion, SQL/REST/PGWire for queries):
 
 - **Web Console** (`http://<host>:9000`) for ad-hoc queries,
-- **Grafana** with the QuestDB data source (sample dashboards ship in the
-  dev-stack repository),
+- **Grafana** with the
+  [official QuestDB data source](https://grafana.com/grafana/plugins/questdb-questdb-datasource/) —
+  the panel queries are worked through in [docs/grafana.md](docs/grafana.md), and
+  sample dashboards ship in the dev-stack repository,
 - **Home Assistant's built-in SQL integration** over the PostgreSQL wire
   protocol (`postgresql://admin:quest@questdb:8812/qdb`) to bring values
   into HA states and automations — see the section below,
@@ -236,9 +257,12 @@ the WHERE clause goes first):
 ```sql
 SELECT entity_id, state
 FROM hass
-WHERE entity_id = 'sensor.carbon_monoxide'
+WHERE entity_id = 'sensor.example_temperature'
 LATEST ON last_updated PARTITION BY entity_id;
 ```
+
+The newest stored row — a sensor that stopped reporting shows its last value, not
+a fresh one.
 
 **Events per hour** ([`SAMPLE BY`](https://questdb.com/docs/reference/sql/sample-by/),
 [`dateadd`](https://questdb.com/docs/query/functions/date-time/)):
@@ -247,8 +271,12 @@ LATEST ON last_updated PARTITION BY entity_id;
 SELECT entity_id, count() AS events
 FROM hass
 WHERE last_updated > dateadd('h', -6, now())
-SAMPLE BY 1h;
+SAMPLE BY 1h
+ORDER BY events DESC LIMIT 20;
 ```
+
+One row per entity per hour — thousands of rows on a large instance, so the
+busiest few are kept in view.
 
 **Hourly average of a numeric entity** — states are stored as text, so
 numeric aggregates need a [cast](https://questdb.com/docs/reference/sql/cast/):
@@ -256,7 +284,7 @@ numeric aggregates need a [cast](https://questdb.com/docs/reference/sql/cast/):
 ```sql
 SELECT entity_id, avg(CAST(state AS DOUBLE)) AS avg_state
 FROM hass
-WHERE entity_id = 'sensor.carbon_monoxide'
+WHERE entity_id = 'sensor.example_temperature'
   AND last_updated > dateadd('h', -2, now())
 SAMPLE BY 1h;
 ```
@@ -267,6 +295,10 @@ SAMPLE BY 1h;
 SELECT count(), size_pretty(sum(diskSize)) AS table_size
 FROM table_partitions('hass');
 ```
+
+These queries are the basis of the Grafana panels; turning them into a panel is
+covered in [docs/grafana.md](docs/grafana.md), with one example reading a value
+from `state` and one reading it out of the `attributes` JSON.
 
 ### Reading inside Home Assistant (SQL integration)
 
@@ -316,7 +348,7 @@ while the connection is failing. Check the integration state:
    | `could not reach QuestDB` / connection refused | Wrong host/port or QuestDB down | Reconfigure; check the host reachability from the HA container |
    | `HTTP 401` / rejected credentials | Wrong username/password | Reconfigure |
    | `table ... does not match the owned schema` | Table was created outside the integration (Web Console, Grafana…) | Drop the table, or point the entry at a fresh table name |
-   | `spool is full` | SQLite spool hit its capacity while QuestDB was unreachable | Fix the connection; events stay in the dead letter |
+   | `spool is full` / `Spool persistence paused` | the spool reached a capacity limit, the filesystem ran out of space, or the database became read-only | fix the connection; accepted events stay queued and the writer resumes by itself, returning the pages of delivered rows to the filesystem when the spool is what filled the disk — this case never moves events into the dead letter |
 
 ### The table is not created
 
@@ -387,9 +419,9 @@ DEDUP UPSERT KEYS(last_updated, entity_id)`.
 | `domain` | SYMBOL | |
 | `state` | VARCHAR | numeric states castable: `CAST(state AS DOUBLE)` |
 | `attributes` | VARCHAR | JSON |
-| `event_id` | VARCHAR | HA event id |
+| `event_id` | VARCHAR | UUID generated by the integration for every accepted event — **not** the HA event id |
 | `context_id` | VARCHAR | HA context id |
-| `ingested_at` | TIMESTAMP | when the writer persisted the event |
+| `ingested_at` | TIMESTAMP | when the listener accepted the event, i.e. before the spool write (not the persistence time) |
 | `last_changed` | TIMESTAMP | |
 
 `unknown` states are skipped by the listener; `unavailable` is written.
@@ -397,21 +429,25 @@ DEDUP UPSERT KEYS(last_updated, entity_id)`.
 ## Architecture
 
 State changes are captured by a single listener, wrapped into an
-in-memory envelope (`entity_id`, state, attributes as JSON, HA event and
-context ids, `last_updated`/`last_changed`/ingestion timestamps) and
-pushed into a bounded queue. A background worker drains the queue into a
-durable SQLite spool, batches rows and delivers them to QuestDB over
-HTTP/ILP. Delivery is **at-least-once**: while QuestDB is unreachable the
-spool grows (bounded); after recovery the backlog is delivered and the
-dedup keys (`last_updated`, `entity_id`) make re-delivery idempotent.
-The worker is an explicit state machine (`starting → idle/running →
-retry_wait → dead-letter → stopped`) with exponential backoff, and
-survives HA restarts: setup resumes from the spool.
+in-memory envelope (`entity_id`, state, attributes as JSON, the HA context id,
+an integration-generated `event_id`, and the `last_updated`/`last_changed`/
+ingestion timestamps) and pushed into a bounded queue. A background worker
+drains the queue into a durable SQLite spool, batches rows and delivers them to
+QuestDB over HTTP/ILP. Delivery is **at-least-once**: while QuestDB is
+unreachable the spool grows (bounded); after recovery the backlog is delivered
+and the dedup keys (`last_updated`, `entity_id`) make re-delivery idempotent.
+The worker is an explicit state machine (`new → starting → running →
+retry_wait → blocked → stopping → stopped`, with `failed` for a worker thread
+that died) with exponential backoff, and it survives HA restarts: setup resumes
+from the spool.
 
 ## Development
 
 Unit and integration tests run inside a Home Assistant container
 (`pytest tests/unit tests/integration`), pointed at a local QuestDB. The
+mutation checkers under `dev/mutations/` re-run focused tests against a
+deliberately broken copy of one file, so a test that cannot fail is visible;
+`dev/mutations/README.md` has the exact commands. The
 dev environment — compose stack with HA/QuestDB/Grafana, dashboards,
 live-run checklist — is kept in a separate private repository.
 

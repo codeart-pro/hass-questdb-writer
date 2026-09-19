@@ -36,6 +36,8 @@ CONF_MAX_PENDING_BYTES = "max_pending_bytes"
 CONF_MAX_DEAD_LETTER_ROWS = "max_dead_letter_rows"
 CONF_MAX_DEAD_LETTER_BYTES = "max_dead_letter_bytes"
 CONF_SQLITE_BUSY_TIMEOUT_SECONDS = "sqlite_busy_timeout_seconds"
+CONF_SPOOL_MIN_FREE_BYTES = "spool_min_free_bytes"
+CONF_SPOOL_MIN_FREE_RATIO = "spool_min_free_ratio"
 CONF_HTTP_TIMEOUT_SECONDS = "http_timeout_seconds"
 CONF_START_TIMEOUT_SECONDS = "start_timeout_seconds"
 CONF_STOP_TIMEOUT_SECONDS = "stop_timeout_seconds"
@@ -67,6 +69,15 @@ PROVISIONAL_MAX_PENDING_BYTES = 64 * 1_024 * 1_024
 PROVISIONAL_MAX_DEAD_LETTER_ROWS = 1_000
 PROVISIONAL_MAX_DEAD_LETTER_BYTES = 16 * 1_024 * 1_024
 PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS = 1.0
+
+# Free space the writer leaves untouched on the filesystem that holds the spool.
+# The payload limits above count serialized bytes only, so they cannot see the
+# database pages, the WAL, or the recorder/logs/backups sharing the same disk;
+# these two bound what the writer itself is allowed to consume. 512 MiB covers
+# a 100,000-row spool (~30 MiB of payload at 253 B/row) with room for pages and
+# WAL, and the 5% share keeps large disks from being filled silently.
+PROVISIONAL_SPOOL_MIN_FREE_BYTES = 512 * 1_024 * 1_024
+PROVISIONAL_SPOOL_MIN_FREE_RATIO = 0.05
 
 PROVISIONAL_HTTP_TIMEOUT_SECONDS = 10.0
 PROVISIONAL_START_TIMEOUT_SECONDS = 10.0

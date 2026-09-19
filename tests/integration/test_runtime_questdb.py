@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -18,9 +19,11 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryState,
     SOURCE_REAUTH,
+    SOURCE_RECONFIGURE,
     SOURCE_USER,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import InvalidData
 
 from custom_components.hass_questdb_writer.const import (
     CONF_HOST,
@@ -204,15 +207,27 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active[0]["handler"], DOMAIN)
         self.assertEqual(active[0]["step_id"], "reauth_confirm")
 
+        # The dialog repairs credentials and cannot move the entry: Home
+        # Assistant validates the submitted data against the step's schema, and
+        # the reauth schema no longer carries the destination fields.
+        with self.assertRaises(InvalidData):
+            await self.hass.config_entries.flow.async_configure(
+                active[0]["flow_id"],
+                {
+                    CONF_HOST: "somewhere-else",
+                    CONF_PORT: self.port,
+                    CONF_TABLE: self.table,
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                },
+            )
+
         # Completing the flow validates the credentials against real QuestDB,
         # stores them and reloads the entry.
         finished = await self.hass.config_entries.flow.async_configure(
             active[0]["flow_id"],
             {
-                CONF_HOST: self.host,
-                CONF_PORT: self.port,
-                CONF_TABLE: self.table,
-                CONF_USE_TLS: False,
                 CONF_USERNAME: "",
                 CONF_PASSWORD: "",
             },
@@ -221,9 +236,193 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished["reason"], "reauth_successful")
         await self.hass.async_block_till_done()
         self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        self.assertEqual(entry.data[CONF_HOST], self.host)
+        self.assertEqual(entry.data[CONF_TABLE], self.table)
         self.assertEqual(
             list(entry.async_get_active_flows(self.hass, {SOURCE_REAUTH})), []
         )
+
+    async def test_reconfigure_moves_the_entry_and_the_destination(self) -> None:
+        """Reconfigure to another table: the entry moves and delivery follows."""
+        moved_table = f"{self.table}_moved"
+
+        async def drop_moved_table() -> None:
+            self.sql(f"drop table if exists {moved_table}")
+
+        self.sql(f"drop table if exists {moved_table}")
+        self.addAsyncCleanup(drop_moved_table)
+
+        form = await self.hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await self.hass.config_entries.flow.async_configure(
+            form["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: self.table,
+                CONF_USE_TLS: False,
+            },
+        )
+        entry = result["result"]
+        self.addAsyncCleanup(self._unload_entry, entry)
+        await self.hass.async_block_till_done()
+        self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        original_unique_id = entry.unique_id
+
+        # One event reaches the original destination. The table receives every
+        # state change in the instance, so every count below is scoped to this
+        # entity.
+        entity = "input_boolean.questdb_move"
+        self.hass.states.async_set(entity, "on")
+        await self.hass.async_block_till_done()
+        self.assertTrue(await self._wait_for_rows(self.table, entity, "on"))
+
+        # Reconfigure to another table: the flow validates the new destination
+        # against the real server, stores it and reloads the entry.
+        flow = await self.hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+        )
+        self.assertEqual(flow["step_id"], "user")
+        finished = await self.hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: moved_table,
+                CONF_USE_TLS: False,
+            },
+        )
+        self.assertEqual(finished["type"], "abort")
+        self.assertEqual(finished["reason"], "reconfigure_successful")
+        await self.hass.async_block_till_done()
+        self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        self.assertEqual(entry.data[CONF_TABLE], moved_table)
+        # The identity follows the destination: a second entry aimed at the same
+        # server and table cannot be added next to a moved one.
+        self.assertNotEqual(entry.unique_id, original_unique_id)
+
+        # Delivery follows the entry: the new event lands in the new table, and
+        # the old one keeps exactly the row it had for this entity.
+        self.hass.states.async_set(entity, "off")
+        await self.hass.async_block_till_done()
+        self.assertTrue(await self._wait_for_rows(moved_table, entity, "off"))
+        rows = self.sql(
+            f"select state from {self.table} where entity_id = '{entity}'"
+        )
+        self.assertEqual(rows["dataset"], [["on"]])
+
+        # The identity moved with the destination, so a second entry for the same
+        # destination is refused: that is what a unique_id is for, and asserting
+        # it needs a real second flow instead of a comment.
+        second = await self.hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        duplicate = await self.hass.config_entries.flow.async_configure(
+            second["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: moved_table,
+                CONF_USE_TLS: False,
+            },
+        )
+        self.assertEqual(duplicate["type"], "abort")
+        self.assertEqual(duplicate["reason"], "already_configured")
+
+    async def test_a_resend_after_a_failed_local_ack_keeps_one_row(self) -> None:
+        """At-least-once at the sender, one row per state change at the receiver.
+
+        A batch can be sent, then fail to be acknowledged locally, and be sent
+        again. What matters here is what the destination does with the second
+        copy: the table is created with `DEDUP UPSERT KEYS`, so it has to replace
+        the row instead of storing a second one. Without this check "at-least-once
+        with dedup" is a claim about the schema, not a measured outcome.
+        """
+        entity = "input_boolean.questdb_resend"
+        from custom_components.hass_questdb_writer.spool import (
+            SQLiteSpool,
+            SpoolDiskFullError,
+        )
+
+        original_mark_delivered = SQLiteSpool.mark_delivered
+        calls = {"count": 0}
+
+        def flaky_mark_delivered(spool, sequences):  # noqa: ANN001, ANN202
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise SpoolDiskFullError("simulated local acknowledgement failure")
+            return original_mark_delivered(spool, sequences)
+
+        with patch.object(SQLiteSpool, "mark_delivered", flaky_mark_delivered):
+            form = await self.hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": SOURCE_USER}
+            )
+            result = await self.hass.config_entries.flow.async_configure(
+                form["flow_id"],
+                {
+                    CONF_HOST: self.host,
+                    CONF_PORT: self.port,
+                    CONF_TABLE: self.table,
+                    CONF_USE_TLS: False,
+                },
+            )
+            entry = result["result"]
+            self.addAsyncCleanup(self._unload_entry, entry)
+            await self.hass.async_block_till_done()
+
+            self.hass.states.async_set(entity, "on")
+            await self.hass.async_block_till_done()
+            self.assertTrue(
+                await self._wait_for_rows(self.table, entity, "on", timeout=15)
+            )
+            # The first send already put the row in the destination; what has to
+            # happen next is the retry, on the delivery loop's own backoff. The
+            # wait stays inside the patch, so the injected failure is still in
+            # force while the worker works through it.
+            deadline = time.monotonic() + 15
+            while calls["count"] < 2 and time.monotonic() < deadline:
+                await asyncio.sleep(0.1)
+            self.assertGreaterEqual(
+                calls["count"], 2, "no delivery retry within 15 s"
+            )
+            # The pause the failed acknowledgement opened ends with it, without
+            # any new ingress.
+            await self.hass.async_block_till_done()
+
+        # One physical row and one distinct event id for that state change: the
+        # second send replaced it instead of storing a copy.
+        rows = self.sql(
+            f"select count() from {self.table} where entity_id = '{entity}'"
+        )
+        distinct = self.sql(
+            f"select count_distinct(event_id) from {self.table} "
+            f"where entity_id = '{entity}'"
+        )
+        self.assertEqual(rows["dataset"][0][0], 1)
+        self.assertEqual(distinct["dataset"][0][0], 1)
+
+    async def _wait_for_rows(
+        self,
+        table: str,
+        entity_id: str,
+        state: str,
+        *,
+        timeout: float = 5,
+    ) -> bool:
+        """Wait until the table holds this entity's state change."""
+        statement = (
+            f"select count() from {table} where entity_id = '{entity_id}' "
+            f"and state = '{state}'"
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.sql_maybe(statement)
+            if (result or {}).get("dataset") and result["dataset"][0][0] >= 1:
+                return True
+            await asyncio.sleep(0.05)
+        return False
 
     async def test_config_flow_setup_reload_event_and_unload(self) -> None:
         form = await self.hass.config_entries.flow.async_init(

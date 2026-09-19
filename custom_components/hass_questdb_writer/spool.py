@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 from os import PathLike
+from pathlib import Path
+import shutil
 import sqlite3
 from types import TracebackType
 from typing import Final, Self
@@ -14,6 +16,11 @@ from typing import Final, Self
 SCHEMA_VERSION: Final = 1
 _SQLITE_INTEGER_MIN: Final = -(2**63)
 _SQLITE_INTEGER_MAX: Final = 2**63 - 1
+# `PRAGMA auto_vacuum`: 0 is off, 1 is full, 2 is incremental. Incremental is
+# the mode this spool wants: it returns freed pages on request, in bounded
+# steps, instead of rewriting the file at every opportunity.
+AUTO_VACUUM_NONE: Final = 0
+AUTO_VACUUM_INCREMENTAL: Final = 2
 
 
 class SpoolError(Exception):
@@ -36,6 +43,23 @@ class SpoolFullError(SpoolError):
     """The pending queue has reached an explicit row or payload-byte limit."""
 
 
+class SpoolStorageError(SpoolError):
+    """The storage layer failed in a way that can clear on its own.
+
+    Separate from generic :class:`SpoolError` because the worker reacts to it by
+    blocking and retrying rather than by giving up: the events are still safe,
+    only the place to put them is temporarily unusable.
+    """
+
+
+class SpoolDiskFullError(SpoolStorageError):
+    """SQLite reported ``SQLITE_FULL``: the database or its filesystem is full."""
+
+
+class SpoolReadOnlyError(SpoolStorageError):
+    """SQLite reported a read-only database or filesystem."""
+
+
 class DeadLetterFullError(SpoolError):
     """The dead-letter store has reached an explicit capacity limit."""
 
@@ -46,6 +70,99 @@ class EventTooLargeError(SpoolError):
 
 class BatchLimitTooSmallError(SpoolError):
     """The oldest event cannot fit in an otherwise empty batch."""
+
+
+def _primary_sqlite_code(code: int) -> int:
+    """The primary result code, with any extended part removed.
+
+    SQLite encodes an extended result code as `primary | (n << 8)`, and Python
+    reports the extended one when it has it: `SQLITE_CANTOPEN_FULLPATH` and
+    `SQLITE_IOERR_FSTAT` stand for the same conditions as `SQLITE_CANTOPEN` and
+    `SQLITE_IOERR`. Matching only the primary codes would have missed exactly
+    those - which is how a real filesystem with nothing left reported a bare error
+    where it should have named the condition.
+    """
+    return code & 0xFF
+
+
+# SQLITE_READONLY covers the plain read-only case; the extended codes are what
+# SQLite reports when the filesystem or the database file changed underneath an
+# open connection - all of them mean "this storage cannot be written now".
+_READ_ONLY_SQLITE_CODES: Final = frozenset(
+    _primary_sqlite_code(code)
+    for code in (
+        getattr(sqlite3, "SQLITE_READONLY", None),
+        getattr(sqlite3, "SQLITE_READONLY_RECOVERY", None),
+        getattr(sqlite3, "SQLITE_READONLY_CANTLOCK", None),
+        getattr(sqlite3, "SQLITE_READONLY_ROLLBACK", None),
+        getattr(sqlite3, "SQLITE_READONLY_DBMOVED", None),
+        getattr(sqlite3, "SQLITE_READONLY_CANTINIT", None),
+        getattr(sqlite3, "SQLITE_READONLY_DIRECTORY", None),
+    )
+    if code is not None
+)
+
+# Codes SQLite answers with when the file cannot be created or extended at all -
+# what a filesystem with nothing left looks like before it gets as far as
+# SQLITE_FULL. Measured on a real tmpfs by benchmarks/spool_pressure.py.
+_OUT_OF_SPACE_SQLITE_CODES: Final = frozenset(
+    _primary_sqlite_code(code)
+    for code in (
+        getattr(sqlite3, "SQLITE_CANTOPEN", None),
+        getattr(sqlite3, "SQLITE_IOERR", None),
+    )
+    if code is not None
+)
+
+# Below this, a page and its WAL frame do not fit, so a failed open is the
+# filesystem rather than the path.
+_OUT_OF_SPACE_FREE_BYTES: Final = 64 * 1024
+
+
+def classify_storage_error(
+    exc: sqlite3.Error, message: str, free_bytes: int | None = None
+) -> SpoolError:
+    """Map a SQLite failure onto the spool error the worker reacts to.
+
+    Only the conditions a retry can clear are classified; everything else stays a
+    plain :class:`SpoolError`, which the worker treats as fatal. Manually
+    constructed ``sqlite3.Error`` instances carry no ``sqlite_errorcode``, so they
+    fall through to the generic branch.
+
+    A filesystem with nothing left does not always fail the same way: when the
+    database file itself cannot be created or extended, SQLite answers
+    `SQLITE_CANTOPEN` or `SQLITE_IOERR` instead of `SQLITE_FULL` - measured on a
+    real tmpfs by `benchmarks/spool_pressure.py`. Those codes are only read as a
+    storage condition when the caller measured the free space and it is below what
+    a page write needs; otherwise the same code means a bad path or a permission
+    problem, and a plain error is the honest answer.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    primary = None if code is None else _primary_sqlite_code(code)
+    if primary is not None and primary == getattr(sqlite3, "SQLITE_FULL", None):
+        return SpoolDiskFullError(f"{message}: database or disk is full")
+    if primary in _READ_ONLY_SQLITE_CODES:
+        return SpoolReadOnlyError(f"{message}: database or filesystem is read-only")
+    if (
+        primary in _OUT_OF_SPACE_SQLITE_CODES
+        and free_bytes is not None
+        and free_bytes < _OUT_OF_SPACE_FREE_BYTES
+    ):
+        return SpoolDiskFullError(
+            f"{message}: database or disk is full ({free_bytes} free bytes)"
+        )
+    return SpoolError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class SpoolReclaim:
+    """What one reclamation attempt returned to the filesystem."""
+
+    auto_vacuum: int
+    freed_pages: int
+    wal_truncated: bool
+    rewrote_file: bool = False
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +294,21 @@ _SCHEMA_STATEMENTS: Final = (
 )
 
 
+def _freelist_pages(connection: sqlite3.Connection) -> int:
+    """Pages SQLite holds free inside the file, waiting to be returned."""
+    return int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+
+
+def _truncate_wal(connection: sqlite3.Connection) -> bool:
+    """Checkpoint the write-ahead log and truncate it; True when it is empty.
+
+    In WAL mode a freed page reaches the filesystem only after a checkpoint, so
+    reclamation has to truncate as well as vacuum.
+    """
+    busy = int(connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0])
+    return busy == 0
+
+
 def _positive_integer(name: str, value: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
@@ -254,6 +386,7 @@ class SQLiteSpool:
         self._max_dead_letter_bytes = _positive_integer(
             "max_dead_letter_bytes", max_dead_letter_bytes
         )
+        self._path = Path(path)
         if self._max_event_bytes > self._max_pending_bytes:
             raise ValueError("max_event_bytes must not exceed max_pending_bytes")
         if self._max_event_bytes > self._max_dead_letter_bytes:
@@ -269,6 +402,7 @@ class SQLiteSpool:
             raise ValueError("busy_timeout_seconds must be positive and finite")
 
         self._connection: sqlite3.Connection | None = None
+        self._auto_vacuum = AUTO_VACUUM_NONE
         try:
             connection = sqlite3.connect(
                 path,
@@ -277,6 +411,19 @@ class SQLiteSpool:
             )
             connection.row_factory = sqlite3.Row
             self._connection = connection
+            # Delivered rows free pages inside the file, and a file that never
+            # gives them back keeps the writer paused on the disk it filled
+            # itself (docs/benchmarks/spool-pressure.md). Incremental
+            # auto-vacuum is what returns them, and SQLite accepts the mode only
+            # before anything is written to the database: switching the journal
+            # mode to WAL below already initializes the file, so this has to
+            # come first (measured: setting it after WAL silently keeps mode 0).
+            # On an existing database it is a no-op - the mode there can only be
+            # changed by a rewrite, which is what `compact()` does.
+            connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            self._auto_vacuum = int(
+                connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+            )
             journal_mode = connection.execute(
                 "PRAGMA journal_mode = WAL"
             ).fetchone()[0]
@@ -296,7 +443,32 @@ class SQLiteSpool:
             raise
         except sqlite3.Error as exc:
             self.close()
-            raise SpoolError("failed to initialize SQLite spool") from exc
+            # Classified like every other storage failure: a disk that is full
+            # or read-only at startup is not a broken spool, and the operator
+            # reading the entry's error should be told which of the two it is.
+            # Unlike a runtime failure it still fails the setup, and Home
+            # Assistant retries the entry (ADR 0015).
+            raise classify_storage_error(
+                exc,
+                "failed to initialize SQLite spool",
+                self._free_bytes(),
+            ) from exc
+
+    @property
+    def path(self) -> Path:
+        """The database file this spool owns."""
+        return self._path
+
+    def _free_bytes(self) -> int | None:
+        """Free space where this spool lives, or None when it cannot be measured.
+
+        Used to tell "the filesystem has nothing left" apart from a path or
+        permission problem when SQLite reports the codes both of them share.
+        """
+        try:
+            return shutil.disk_usage(self._path.parent).free
+        except OSError:
+            return None
 
     @property
     def _db(self) -> sqlite3.Connection:
@@ -520,7 +692,7 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to enqueue events") from exc
+            raise classify_storage_error(exc, "failed to enqueue events") from exc
         return len(new_events)
 
     def peek_batch(
@@ -581,8 +753,85 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to mark events delivered") from exc
+            raise classify_storage_error(exc, "failed to mark events delivered") from exc
         return len(sequence_values)
+
+    def reclaim(self, *, max_pages: int) -> SpoolReclaim:
+        """Return freed pages and the write-ahead log to the filesystem.
+
+        Delivered rows free pages *inside* the file, and the filesystem keeps
+        the space until they are given back: a writer paused on a full disk
+        otherwise stays paused forever
+        (docs/benchmarks/spool-pressure.md). Incremental auto-vacuum returns
+        them in bounded steps, so a call is cheap enough to sit next to a
+        durable write; a database created without that mode needs
+        :meth:`compact` instead.
+
+        Never raises: reclamation runs while the writer is paused, and a pause
+        must not turn into a failure.
+        """
+        _positive_integer("max_pages", max_pages)
+        freed_pages = 0
+        try:
+            connection = self._db
+            if self._auto_vacuum == AUTO_VACUUM_INCREMENTAL:
+                before = _freelist_pages(connection)
+                # Drained on purpose: `incremental_vacuum(N)` returns one row per
+                # page it moves, and a statement that is never iterated moves a
+                # single page (measured: 1 page per call instead of 4,096).
+                connection.execute(
+                    f"PRAGMA incremental_vacuum({max_pages})"
+                ).fetchall()
+                freed_pages = max(0, before - _freelist_pages(connection))
+            wal_truncated = _truncate_wal(connection)
+        except (sqlite3.Error, SpoolClosedError) as exc:
+            return SpoolReclaim(
+                auto_vacuum=self._auto_vacuum,
+                freed_pages=freed_pages,
+                wal_truncated=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return SpoolReclaim(
+            auto_vacuum=self._auto_vacuum,
+            freed_pages=freed_pages,
+            wal_truncated=wal_truncated,
+        )
+
+    def compact(self) -> SpoolReclaim:
+        """Rewrite the file and switch it to incremental auto-vacuum.
+
+        The only way to give space back for a database created before
+        incremental auto-vacuum was set: SQLite can change the mode only through
+        a rewrite, and that rewrite needs room for the live data while it runs.
+        It can therefore fail on the filesystem that is already full, which is
+        why new spools are created in incremental mode and this is the fallback.
+
+        Never raises.
+        """
+        try:
+            connection = self._db
+            before = _freelist_pages(connection)
+            if self._auto_vacuum != AUTO_VACUUM_INCREMENTAL:
+                connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+            connection.execute("VACUUM").fetchall()
+            self._auto_vacuum = int(
+                connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+            )
+            freed_pages = max(0, before - _freelist_pages(connection))
+            wal_truncated = _truncate_wal(connection)
+        except (sqlite3.Error, SpoolClosedError) as exc:
+            return SpoolReclaim(
+                auto_vacuum=self._auto_vacuum,
+                freed_pages=0,
+                wal_truncated=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return SpoolReclaim(
+            auto_vacuum=self._auto_vacuum,
+            freed_pages=freed_pages,
+            wal_truncated=wal_truncated,
+            rewrote_file=True,
+        )
 
     def record_attempt(
         self,
@@ -618,7 +867,7 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to record delivery attempt") from exc
+            raise classify_storage_error(exc, "failed to record delivery attempt") from exc
         return len(sequence_values)
 
     def move_to_dead_letter(
@@ -747,7 +996,9 @@ class SQLiteSpool:
         except SpoolError:
             raise
         except sqlite3.Error as exc:
-            raise SpoolError("failed to move events to dead letter") from exc
+            raise classify_storage_error(
+                exc, "failed to move events to dead letter"
+            ) from exc
         return moved, evicted
 
     def peek_dead_letters(self, *, limit: int) -> tuple[DeadLetterRecord, ...]:

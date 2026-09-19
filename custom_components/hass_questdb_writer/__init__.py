@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TypeAlias
 
@@ -28,36 +29,30 @@ from .const import (
     CONF_DELIVERY_BATCH_ROWS,
     CONF_FLUSH_INTERVAL_SECONDS,
     CONF_FLUSH_ON_SHUTDOWN,
-    CONF_HOST,
-    CONF_HTTP_TIMEOUT_SECONDS,
     CONF_INGRESS_QUEUE_CAPACITY,
     CONF_MAX_DEAD_LETTER_BYTES,
     CONF_MAX_DEAD_LETTER_ROWS,
     CONF_MAX_PENDING_BYTES,
     CONF_MAX_PENDING_ROWS,
     CONF_MAX_SERIALIZED_EVENT_BYTES,
-    CONF_PASSWORD,
     CONF_PERSIST_BATCH_ROWS,
     CONF_PERSIST_IDLE_POLL_SECONDS,
-    CONF_PORT,
     CONF_RETENTION_DAYS,
     CONF_RETRY_INITIAL_SECONDS,
     CONF_RETRY_JITTER_RATIO,
     CONF_RETRY_MAX_SECONDS,
     CONF_RETRY_MULTIPLIER,
     CONF_SQLITE_BUSY_TIMEOUT_SECONDS,
+    CONF_SPOOL_MIN_FREE_BYTES,
+    CONF_SPOOL_MIN_FREE_RATIO,
     CONF_START_TIMEOUT_SECONDS,
     CONF_STOP_TIMEOUT_SECONDS,
     CONF_TABLE,
-    CONF_TLS_SELF_SIGNED,
-    CONF_USE_TLS,
-    CONF_USERNAME,
     DOMAIN,
     PROVISIONAL_DELIVERY_BATCH_BYTES,
     PROVISIONAL_DELIVERY_BATCH_ROWS,
     PROVISIONAL_FLUSH_INTERVAL_SECONDS,
     PROVISIONAL_FLUSH_ON_SHUTDOWN,
-    PROVISIONAL_HTTP_TIMEOUT_SECONDS,
     PROVISIONAL_INGRESS_QUEUE_CAPACITY,
     PROVISIONAL_MAX_DEAD_LETTER_BYTES,
     PROVISIONAL_MAX_DEAD_LETTER_ROWS,
@@ -71,20 +66,24 @@ from .const import (
     PROVISIONAL_RETRY_MAX_SECONDS,
     PROVISIONAL_RETRY_MULTIPLIER,
     PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS,
+    PROVISIONAL_SPOOL_MIN_FREE_BYTES,
+    PROVISIONAL_SPOOL_MIN_FREE_RATIO,
     PROVISIONAL_START_TIMEOUT_SECONDS,
     PROVISIONAL_STOP_TIMEOUT_SECONDS,
 )
 from .runtime import (
-    ConnectionConfiguration,
     HassQuestDbRuntime,
     RuntimeConfiguration,
     SpoolConfiguration,
+    connection_configuration,
 )
 from .worker import (
     WorkerSettings,
     WorkerStartError,
     WorkerStartTimeoutError,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 HassQuestDbConfigEntry: TypeAlias = ConfigEntry[HassQuestDbRuntime]
 
@@ -138,17 +137,7 @@ def _runtime_configuration(
                 PROVISIONAL_SQLITE_BUSY_TIMEOUT_SECONDS,
             ),
         ),
-        connection=ConnectionConfiguration(
-            host=data[CONF_HOST],
-            port=data[CONF_PORT],
-            use_tls=data[CONF_USE_TLS],
-            timeout_seconds=options.get(
-                CONF_HTTP_TIMEOUT_SECONDS, PROVISIONAL_HTTP_TIMEOUT_SECONDS
-            ),
-            username=data.get(CONF_USERNAME),
-            password=data.get(CONF_PASSWORD),
-            tls_self_signed=bool(data.get(CONF_TLS_SELF_SIGNED, False)),
-        ),
+        connection=connection_configuration(data, options),
         worker=WorkerSettings(
             ingress_queue_capacity=options.get(
                 CONF_INGRESS_QUEUE_CAPACITY,
@@ -190,6 +179,12 @@ def _runtime_configuration(
             ),
             flush_on_shutdown=options.get(
                 CONF_FLUSH_ON_SHUTDOWN, PROVISIONAL_FLUSH_ON_SHUTDOWN
+            ),
+            min_free_bytes=options.get(
+                CONF_SPOOL_MIN_FREE_BYTES, PROVISIONAL_SPOOL_MIN_FREE_BYTES
+            ),
+            min_free_ratio=options.get(
+                CONF_SPOOL_MIN_FREE_RATIO, PROVISIONAL_SPOOL_MIN_FREE_RATIO
             ),
         ),
         start_timeout_seconds=options.get(
@@ -240,7 +235,21 @@ async def async_setup_entry(
             f"QuestDB writer did not start: {err}"
         ) from err
     entry.runtime_data = runtime
-    await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+    except BaseException:
+        # The runtime owns the worker, the state listener and the auth monitor.
+        # Home Assistant does not call async_unload_entry for an entry whose
+        # setup failed - it only runs the on_unload callbacks registered so far
+        # - so without this the worker would outlive the failed setup and the
+        # next retry would start a second one on the same spool file.
+        try:
+            await runtime.async_stop()
+        except Exception:
+            _LOGGER.exception(
+                "Could not stop the writer after config-entry setup failed"
+            )
+        raise
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     return True
 

@@ -10,6 +10,11 @@ from unittest.mock import AsyncMock, Mock, patch
 from homeassistant.components.sensor import SensorDeviceClass
 
 from custom_components.hass_questdb_writer import sensor as sensor_module
+from custom_components.hass_questdb_writer.const import (
+    CONF_HTTP_TIMEOUT_SECONDS,
+    CONF_TLS_SELF_SIGNED,
+    CONF_USE_TLS,
+)
 from custom_components.hass_questdb_writer.entity import QuestDbWriterEntity
 from custom_components.hass_questdb_writer.sensor import (
     HealthSensorSpec,
@@ -147,7 +152,9 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sensor.unique_id, "entry-1-state")
         self.assertEqual(sensor.device_info["identifiers"], {("hass_questdb_writer", "entry-1")})
 
-    def table_size_sensor(self) -> QuestDbTableSizeSensor:
+    def table_size_sensor(
+        self, *, data: dict | None = None, options: dict | None = None
+    ) -> QuestDbTableSizeSensor:
         entry = Mock(
             entry_id="entry-1",
             data={
@@ -157,9 +164,37 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
                 "use_tls": False,
                 "username": None,
                 "password": None,
+                **(data or {}),
             },
+            options=dict(options or {}),
         )
         return QuestDbTableSizeSensor(entry, "hass")
+
+    async def test_table_size_uses_the_connection_settings_of_the_entry(
+        self,
+    ) -> None:
+        # This query used to hardcode its own timeout and ignore the
+        # self-signed flag, so the sensor could stay unavailable while the
+        # worker delivered happily. It must build the same connection the rest
+        # of the integration uses.
+        sensor = self.table_size_sensor(
+            data={CONF_USE_TLS: True, CONF_TLS_SELF_SIGNED: True},
+            options={CONF_HTTP_TIMEOUT_SECONDS: 7.5},
+        )
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(side_effect=lambda fn, *a: fn(*a))
+        )
+        with patch(
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1_000_000]]}
+            )
+            await sensor.async_update()
+        kwargs = transport_cls.call_args.kwargs
+        self.assertEqual(kwargs["timeout_seconds"], 7.5)
+        self.assertTrue(kwargs["use_tls"])
+        self.assertIsNotNone(kwargs["ssl_context"])
 
     async def test_table_size_reports_bytes(self) -> None:
         sensor = self.table_size_sensor()
@@ -169,7 +204,7 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         with patch(
-            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
         ) as transport_cls:
             transport_cls.return_value.exec_query = Mock(
                 return_value={"dataset": [[1073741824]]}
@@ -192,7 +227,7 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch(
-            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
         ) as transport_cls:
             transport_cls.return_value.exec_query = Mock(
                 side_effect=RetryableIlpError(
@@ -235,7 +270,7 @@ class TableSizeAvailabilityLoggingTests(unittest.IsolatedAsyncioTestCase):
 
         sensor = self.sensor()
         with patch(
-            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
         ) as transport_cls:
             transport_cls.return_value.exec_query = Mock(
                 side_effect=RetryableIlpError(
@@ -266,7 +301,7 @@ class TableSizeAvailabilityLoggingTests(unittest.IsolatedAsyncioTestCase):
     async def test_healthy_refreshes_stay_silent(self) -> None:
         sensor = self.sensor()
         with patch(
-            "custom_components.hass_questdb_writer.sensor.IlpHttpTransport"
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
         ) as transport_cls:
             transport_cls.return_value.exec_query = Mock(
                 return_value={"dataset": [[1_000_000]]}

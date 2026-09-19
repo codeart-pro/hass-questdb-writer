@@ -22,8 +22,11 @@ from custom_components.hass_questdb_writer.const import (
     CONF_EXCLUDE,
     CONF_FLUSH_ON_SHUTDOWN,
     CONF_HOST,
+    CONF_HTTP_TIMEOUT_SECONDS,
     CONF_INCLUDE,
+    CONF_INGRESS_QUEUE_CAPACITY,
     CONF_MAX_DEAD_LETTER_BYTES,
+    CONF_MAX_PENDING_ROWS,
     CONF_MAX_SERIALIZED_EVENT_BYTES,
     CONF_PASSWORD,
     CONF_PORT,
@@ -148,13 +151,20 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"][CONF_HOST], "QuestDB")
         self.assertEqual(result["data"][CONF_TABLE], "events")
 
-    def _reconfigure_flow(self, entry_data: dict) -> HassQuestDbWriterConfigFlow:
-        entry = Mock(data=entry_data)
+    def _reconfigure_flow(
+        self,
+        entry_data: dict,
+        *,
+        unique_id: str = "http://questdb:9000/events",
+        other_entries: list | None = None,
+    ) -> HassQuestDbWriterConfigFlow:
+        entry = Mock(data=entry_data, entry_id="entry-1", unique_id=unique_id)
         flow = HassQuestDbWriterConfigFlow()
         flow.context = {"source": SOURCE_RECONFIGURE, "entry_id": "entry-1"}
         flow.hass = Mock(
             config_entries=Mock(
-                async_get_known_entry=Mock(return_value=entry)
+                async_get_known_entry=Mock(return_value=entry),
+                async_entries=Mock(return_value=list(other_entries or [])),
             )
         )
         return flow
@@ -197,6 +207,133 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         defaults = result["data_schema"]({})
         self.assertEqual(defaults[CONF_USERNAME], "")
         self.assertEqual(defaults[CONF_PASSWORD], "")
+
+    async def test_reconfigure_moves_the_unique_id_with_the_destination(
+        self,
+    ) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "secret",
+            }
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb2",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "prod",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertEqual(
+            update.call_args.kwargs["unique_id"], "https://questdb2:9001/prod"
+        )
+
+    async def test_reconfigure_keeping_the_destination_keeps_the_identity(
+        self,
+    ) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            }
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertNotIn("unique_id", update.call_args.kwargs)
+
+    async def test_reconfigure_aborts_when_another_entry_owns_the_destination(
+        self,
+    ) -> None:
+        other = Mock(entry_id="entry-2", unique_id="https://questdb2:9001/prod")
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            },
+            other_entries=[other],
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            result = await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb2",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "prod",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertEqual(result["type"], "abort")
+        self.assertEqual(result["reason"], "already_configured")
+        update.assert_not_called()
+
+    async def test_connection_probe_uses_the_entry_options(self) -> None:
+        # The probe is what the UI reports, so it has to verify the same
+        # timeout and TLS policy the worker will use, not a hardcoded default.
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: True,
+                CONF_TLS_SELF_SIGNED: True,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            }
+        )
+        flow._get_reconfigure_entry().options = {CONF_HTTP_TIMEOUT_SECONDS: 7.5}
+        flow.hass.async_add_executor_job = AsyncMock(
+            side_effect=lambda fn, *args: fn(*args)
+        )
+        with patch(
+            "custom_components.hass_questdb_writer.config_flow.build_transport"
+        ) as build:
+            await flow._test_connection(
+                self.user_input(
+                    {CONF_USE_TLS: True, CONF_TLS_SELF_SIGNED: True}
+                )
+            )
+        connection = build.call_args[0][0]
+        self.assertEqual(connection.timeout_seconds, 7.5)
+        self.assertTrue(connection.use_tls)
+        self.assertTrue(connection.tls_self_signed)
 
     async def test_reconfigure_updates_entry_and_keeps_stored_secret(self) -> None:
         flow = self._reconfigure_flow(
@@ -335,16 +472,48 @@ class ReauthFlowTests(unittest.IsolatedAsyncioTestCase):
             CONF_PASSWORD: "secret",
         }
 
-    async def test_reauth_prefills_connection_and_hides_password(self) -> None:
+    async def test_reauth_prefills_credentials_only(self) -> None:
         flow = self._reauth_flow(self.stored_entry_data())
         result = await flow.async_step_reauth({})
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "reauth_confirm")
+        schema = result["data_schema"].schema
+        # Reauth repairs credentials; the destination is not editable here.
+        self.assertNotIn(CONF_HOST, schema)
+        self.assertNotIn(CONF_PORT, schema)
+        self.assertNotIn(CONF_TABLE, schema)
+        self.assertNotIn(CONF_USE_TLS, schema)
         defaults = result["data_schema"]({})
-        self.assertEqual(defaults[CONF_HOST], "questdb")
-        self.assertEqual(defaults[CONF_PORT], 9000)
         self.assertEqual(defaults[CONF_USERNAME], "admin")
         self.assertEqual(defaults[CONF_PASSWORD], "")
+
+    async def test_reauth_cannot_move_the_entry_to_another_destination(
+        self,
+    ) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        update = Mock(return_value={"type": "abort", "reason": "reauth_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            await flow.async_step_reauth_confirm(
+                {
+                    CONF_HOST: "someone-elses-nas",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "prod",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "new-secret",
+                }
+            )
+        update.assert_called_once()
+        stored = update.call_args.kwargs["data"]
+        self.assertEqual(stored[CONF_HOST], "questdb")
+        self.assertEqual(stored[CONF_PORT], 9000)
+        self.assertEqual(stored[CONF_TABLE], "events")
+        self.assertFalse(stored[CONF_USE_TLS])
+        self.assertEqual(stored[CONF_PASSWORD], "new-secret")
+        self.assertNotIn("unique_id", update.call_args.kwargs)
 
     async def test_reauth_keeps_stored_secret_when_password_is_empty(
         self,
@@ -533,6 +702,29 @@ class OptionsFlowTests(unittest.IsolatedAsyncioTestCase):
             result["data"][CONF_ATTRIBUTE_DENYLIST],
             ["rssi", "linkquality"],
         )
+
+    async def test_init_step_keeps_stored_advanced_options(self) -> None:
+        # Editing filters alone must not silently reset the tuning knobs that
+        # the advanced step wrote earlier: both live in entry.options.
+        stored = {
+            CONF_DELIVERY_BATCH_ROWS: 7,
+            CONF_FLUSH_ON_SHUTDOWN: True,
+            CONF_HTTP_TIMEOUT_SECONDS: 9.5,
+            CONF_INGRESS_QUEUE_CAPACITY: 5_000,
+            CONF_MAX_PENDING_ROWS: 12_345,
+            CONF_RETENTION_DAYS: 30,
+        }
+        flow = self.flow(stored)
+        result = await self._init(flow, self.filter_input())
+        self.assertEqual(result["type"], "create_entry")
+        self.assertEqual(
+            result["data"][CONF_INCLUDE]["entities"], ["sensor.kitchen"]
+        )
+        for key, value in stored.items():
+            self.assertEqual(
+                result["data"].get(key), value, f"{key} was dropped"
+            )
+        self.assertNotIn(CONF_SHOW_ADVANCED, result["data"])
 
     async def test_init_step_carries_filter_into_advanced_step(self) -> None:
         flow = self.flow()

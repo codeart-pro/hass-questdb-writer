@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
 import json
 from pathlib import Path
+import re
 from threading import Event, Lock
 import tempfile
 import time
@@ -18,11 +20,18 @@ from custom_components.hass_questdb_writer.schema import SchemaMismatchError
 from custom_components.hass_questdb_writer.spool import (
     DeadLetterFullError,
     NewSpoolEvent,
+    SpoolDiskFullError,
     SpoolError,
     SpoolFullError,
+    SpoolReadOnlyError,
+    SpoolReclaim,
     SQLiteSpool,
     SpoolRecord,
     SpoolStats,
+)
+from custom_components.hass_questdb_writer.storage_guard import (
+    FilesystemGuard,
+    StorageUsage,
 )
 from custom_components.hass_questdb_writer.transport import (
     AuthenticationIlpError,
@@ -189,6 +198,142 @@ def _running_in_persist_loop() -> bool:
     return getattr(coroutine, "__qualname__", "") == "WriterService._persist_loop"
 
 
+class StorageFailureScript:
+    """Failure state shared between the test thread and the worker's spool."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.error = error
+        self.enqueue_calls = 0
+        self.enqueue_failures = 0
+        # Delivery-side durable writes: the first `mark_delivered_failures` calls
+        # raise `mark_delivered_error`, the rest go through. The remote send is
+        # unaffected, which is the case the reviewer described (a successful
+        # send followed by a local acknowledgement that cannot be written).
+        self.mark_delivered_error: BaseException | None = None
+        self.mark_delivered_failures = 0
+        self.mark_delivered_calls = 0
+
+
+class StorageFailureSpool:
+    """Spool double whose durable write fails while the script says so.
+
+    The inner spool is created on the calling thread, so the factory must build
+    it: SQLite connections are thread-affine and the worker opens its spool from
+    the worker thread.
+    """
+
+    def __init__(self, inner: SQLiteSpool, script: StorageFailureScript) -> None:
+        self._inner = inner
+        self._script = script
+
+    @property
+    def path(self) -> Path:
+        return self._inner.path
+
+    def enqueue_many(self, events: tuple[NewSpoolEvent, ...]) -> int:
+        self._script.enqueue_calls += 1
+        error = self._script.error
+        if error is not None:
+            self._script.enqueue_failures += 1
+            raise error
+        return self._inner.enqueue_many(events)
+
+    def mark_delivered(self, sequences: tuple[int, ...]) -> int:
+        self._script.mark_delivered_calls += 1
+        error = self._script.mark_delivered_error
+        if (
+            error is not None
+            and self._script.mark_delivered_calls <= self._script.mark_delivered_failures
+        ):
+            raise error
+        return self._inner.mark_delivered(sequences)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+def _ilp_event_id_list(payloads: list[bytes]) -> list[str]:
+    """Event ids carried by the ILP rows the transport was asked to send, in order.
+
+    A list, not a set: a re-sent batch has to be visible as the same id appearing
+    twice, which is exactly what a set would hide.
+    """
+    found: list[str] = []
+    for payload in payloads:
+        found.extend(
+            match.decode("utf-8", "replace")
+            for match in re.findall(rb'event_id="([^"]*)"', payload)
+        )
+    return found
+
+
+def _ilp_event_ids(payloads: list[bytes]) -> set[str]:
+    """Event ids carried by the ILP rows the transport was asked to send."""
+    return set(_ilp_event_id_list(payloads))
+
+
+class MutableFilesystem:
+    """A fake filesystem whose free space the test controls."""
+
+    def __init__(self, *, total_bytes: int, free_bytes: int) -> None:
+        self.total_bytes = total_bytes
+        self.free_bytes = free_bytes
+        self.checks = 0
+
+    def usage(self, path: Path) -> StorageUsage:
+        self.checks += 1
+        return StorageUsage(
+            total_bytes=self.total_bytes, free_bytes=self.free_bytes
+        )
+
+
+class ReclaimAwareFilesystem(MutableFilesystem):
+    """Free space that only comes back once the spool gives pages back.
+
+    Models the measured failure mode: the disk is full because the spool filled
+    it, so returning pages inside the spool file is what restores free space.
+    """
+
+    def __init__(
+        self, *, total_bytes: int, free_bytes: int, reclaims_until_free: int
+    ) -> None:
+        super().__init__(total_bytes=total_bytes, free_bytes=free_bytes)
+        self.free_after_reclaim = 10_000_000
+        self.reclaims_until_free = reclaims_until_free
+        self.reclaims = 0
+
+    def usage(self, path: Path) -> StorageUsage:
+        self.checks += 1
+        free = (
+            self.free_bytes
+            if self.reclaims < self.reclaims_until_free
+            else self.free_after_reclaim
+        )
+        return StorageUsage(total_bytes=self.total_bytes, free_bytes=free)
+
+    def note_reclaim(self) -> None:
+        self.reclaims += 1
+
+
+class ReclaimingSpool:
+    """Spool double that records the reclamations the worker asked for."""
+
+    def __init__(self, inner: object, filesystem: ReclaimAwareFilesystem) -> None:
+        self._inner = inner
+        self._filesystem = filesystem
+
+    @property
+    def path(self) -> Path:
+        return self._inner.path
+
+    def reclaim(self, *, max_pages: int) -> object:
+        self._filesystem.note_reclaim()
+        return self._inner.reclaim(max_pages=max_pages)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
 class WriterServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -252,6 +397,7 @@ class WriterServiceTests(unittest.TestCase):
         settings: WorkerSettings | None = None,
         spool_factory: Callable[[], object] | None = None,
         schema_factory: Callable[[], ScriptedSchema] | None = None,
+        filesystem_guard: FilesystemGuard | None = None,
     ) -> WriterService:
         service = WriterService(
             table="ha_events",
@@ -260,6 +406,7 @@ class WriterServiceTests(unittest.TestCase):
             transport_factory=lambda: transport,
             schema_factory=schema_factory,
             random_source=lambda: 0.5,
+            filesystem_guard=filesystem_guard,
         )
         self.services.append(service)
         return service
@@ -972,6 +1119,7 @@ class WriterServiceTests(unittest.TestCase):
         service.start(timeout_seconds=1)
         service.submit(self.event(1))
         self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        self.assertEqual(service.snapshot().block_reason, "spool_full")
         self.assertIn(
             "pending rows limit reached", service.snapshot().last_error or ""
         )
@@ -979,6 +1127,402 @@ class WriterServiceTests(unittest.TestCase):
         service.stop(timeout_seconds=0.05)
         self.wait_for(lambda: service.snapshot().state is WorkerState.FAILED)
         self.assertIn("unpersisted", service.snapshot().last_error or "")
+
+    def test_disk_full_pauses_persistence_instead_of_failing(self) -> None:
+        script = StorageFailureScript(
+            SpoolDiskFullError("failed to enqueue events: database or disk is full")
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        blocked = service.snapshot()
+        self.assertEqual(blocked.block_reason, "disk_full")
+        self.assertEqual(blocked.storage_blocks, 1)
+        self.assertTrue(blocked.thread_alive)
+        self.assertEqual(blocked.held_unpersisted, 1)
+
+        # The filesystem recovers: the very same batch must go through.
+        script.error = None
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        recovered = service.snapshot()
+        self.assertEqual(recovered.storage_recoveries, 1)
+        self.assertIsNone(recovered.block_reason)
+        service.stop(timeout_seconds=1)
+
+    def test_read_only_database_pauses_persistence_instead_of_failing(
+        self,
+    ) -> None:
+        script = StorageFailureScript(
+            SpoolReadOnlyError(
+                "failed to enqueue events: database or filesystem is read-only"
+            )
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        self.assertEqual(service.snapshot().block_reason, "readonly")
+        self.assertTrue(service.snapshot().thread_alive)
+
+        script.error = None
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        self.assertEqual(service.snapshot().storage_recoveries, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_low_free_space_blocks_before_any_durable_write(self) -> None:
+        script = StorageFailureScript()
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        blocked = service.snapshot()
+        self.assertEqual(blocked.block_reason, "disk_space")
+        self.assertEqual(blocked.storage_blocks, 1)
+        self.assertEqual(blocked.disk_free_bytes, 500)
+        self.assertEqual(blocked.disk_reserve_bytes, 100_000)
+        self.assertIn("below the 100000 byte reserve", blocked.last_error or "")
+        # The guard must stop the write, not discover the problem through it.
+        self.assertEqual(script.enqueue_calls, 0)
+
+        filesystem.free_bytes = 10_000_000
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        self.assertEqual(service.snapshot().storage_recoveries, 1)
+        self.assertGreaterEqual(script.enqueue_calls, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_reclaim_prevents_a_pause_when_the_spool_has_pages_to_return(
+        self,
+    ) -> None:
+        # The measured case: the disk is full because the spool filled it, and
+        # the rows that were already delivered left free pages inside the file.
+        # Returning them is what restores free space, so the writer must ask
+        # before it pauses - no operator, no reload.
+        filesystem = ReclaimAwareFilesystem(
+            total_bytes=1_000_000, free_bytes=500, reclaims_until_free=1
+        )
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        script = StorageFailureScript()
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: ReclaimingSpool(
+                StorageFailureSpool(self.open_spool(), script), filesystem
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: service.snapshot().state is WorkerState.RUNNING
+            and service.snapshot().persisted_events == 1
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(filesystem.reclaims, 1)
+        self.assertEqual(snapshot.storage_blocks, 0)
+        self.assertGreaterEqual(script.enqueue_calls, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_pause_ends_when_reclaiming_frees_space(self) -> None:
+        # The first reclamation finds nothing (delivery has not drained a row
+        # yet), the pause is counted once, and the next pass returns the pages
+        # and clears it - the sequence the pressure benchmark measured.
+        filesystem = ReclaimAwareFilesystem(
+            total_bytes=1_000_000, free_bytes=500, reclaims_until_free=2
+        )
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: ReclaimingSpool(
+                StorageFailureSpool(self.open_spool(), StorageFailureScript()),
+                filesystem,
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: service.snapshot().persisted_events == 1, timeout=5
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.state, WorkerState.RUNNING)
+        self.assertEqual(snapshot.storage_blocks, 1)
+        self.assertEqual(snapshot.storage_recoveries, 1)
+        self.assertGreaterEqual(filesystem.reclaims, 2)
+        service.stop(timeout_seconds=1)
+
+    def test_storage_blocks_counts_pauses_not_attempts(self) -> None:
+        # Measured: one pause produced 284,249 "cumulative pauses" because the
+        # counter followed every blocked attempt
+        # (docs/benchmarks/spool-pressure.md).
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            settings=self.settings(persist_idle_poll_seconds=0.01),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), StorageFailureScript()
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        for index in range(3):
+            service.submit(self.event(index))
+        self.wait_for(
+            lambda: service.snapshot().storage_block_attempts >= 5
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.storage_blocks, 1)
+        self.assertGreaterEqual(snapshot.storage_block_attempts, 5)
+        service.stop(timeout_seconds=0.5)
+
+    def test_shutdown_with_a_blocked_flush_does_not_spin(self) -> None:
+        # Measured: the stopping branch retried with asyncio.sleep(0), so a
+        # shutdown that cannot flush burned a whole core for the full timeout
+        # (docs/benchmarks/spool-pressure.md).
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), StorageFailureScript()
+            ),
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        checks_before = filesystem.checks
+        service.stop(timeout_seconds=0.4)
+        blocked_checks = filesystem.checks - checks_before
+        # A 0.4 s shutdown may re-check a handful of times, not thousands: the
+        # flush still retries, it just waits between attempts now. The pause it
+        # is stuck in stays one pause, however many times it re-checks.
+        self.assertLess(blocked_checks, 40)
+        self.assertEqual(service.snapshot().storage_blocks, 1)
+        self.assertGreater(service.snapshot().storage_block_attempts, 1)
+
+    def test_delivery_side_storage_failure_closes_the_pause_by_itself(self) -> None:
+        # A successful remote send with a local acknowledgement that cannot be
+        # written blocks the worker; when the next attempt writes it, the pause
+        # has to close even though no new ingress arrives - otherwise the
+        # diagnostics keep reporting a pause that is over, and the one rewrite
+        # per pause stays consumed.
+        script = StorageFailureScript()
+        script.mark_delivered_error = SpoolDiskFullError("database or disk is full")
+        script.mark_delivered_failures = 1
+        transport = ScriptedTransport()
+        service = self.service(
+            transport,
+            settings=self.settings(
+                retry_initial_seconds=0.05, retry_max_seconds=5.0
+            ),
+            spool_factory=lambda: StorageFailureSpool(self.open_spool(), script),
+        )
+        service.start(timeout_seconds=1)
+        started = time.monotonic()
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: service.snapshot().delivered_events == 1
+            and service.snapshot().storage_recoveries == 1,
+            timeout=5,
+        )
+        # The retry that ends the pause runs on the backoff schedule, not after
+        # the maximum delay: with a 5 s maximum, a writer that waits it out would
+        # still be parked long after the storage recovered.
+        self.assertLess(time.monotonic() - started, 1.0)
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.state, WorkerState.RUNNING)
+        self.assertEqual(snapshot.delivered_events, 1)
+        self.assertEqual(snapshot.storage_blocks, 1)
+        self.assertEqual(snapshot.storage_recoveries, 1)
+        self.assertGreaterEqual(script.mark_delivered_calls, 2)
+        # The sender side of at-least-once, stated in identity: the batch that
+        # could not be acknowledged was sent again, with the same event id. What
+        # the destination does with the second copy is asserted against the real
+        # QuestDB in tests/integration/test_runtime_questdb.py.
+        sent = Counter(_ilp_event_id_list(transport.payloads))
+        self.assertEqual(sent, Counter({"event-1": 2}))
+        service.stop(timeout_seconds=2)
+
+    def test_accepted_events_are_delivered_or_durable_by_identity(self) -> None:
+        # Counting held + queued + overflowed proves the bookkeeping, not that
+        # the same events survived: a duplicate/missing pair can leave the same
+        # aggregate. This asserts identity instead - every accepted event id is
+        # either in a delivered ILP batch or still durable in the spool.
+        transport = ScriptedTransport()
+        service = self.service(
+            transport,
+            settings=self.settings(
+                ingress_queue_capacity=2,
+                retry_initial_seconds=0.05,
+                retry_max_seconds=0.1,
+            ),
+        )
+        service.start(timeout_seconds=1)
+        accepted = {
+            f"event-{index}"
+            for index in range(5)
+            if service.submit(self.event(index))
+        }
+        # How many of the five the worker accepted depends on how fast it drains
+        # the queue, which is why the property below is asserted for whatever was
+        # accepted instead of for a fixed number.
+        self.assertGreaterEqual(len(accepted), 1)
+        self.wait_for(
+            lambda: service.snapshot().delivered_events == len(accepted),
+            timeout=5,
+        )
+        service.stop(timeout_seconds=2)
+
+        delivered = _ilp_event_ids(transport.payloads)
+        with self.open_spool() as spool:
+            durable = {
+                record.event_id
+                for record in spool.peek_batch(max_rows=100, max_bytes=1_000_000)
+            }
+        # Identity, not cardinality: the same ids, and no id twice in a send.
+        # Re-sends are legitimate after a failed acknowledgement, which is why the
+        # worker-level test below asserts them explicitly instead of forbidding
+        # them in general.
+        self.assertEqual(set(delivered) | durable, accepted)
+        self.assertEqual(delivered & durable, set())
+        self.assertEqual(
+            [event_id for event_id, count in Counter(delivered).items() if count > 1],
+            [],
+        )
+
+    def test_a_failed_reclamation_keeps_the_pause_without_failing(self) -> None:
+        # A pass can fail because the filesystem has no room for the WAL it has
+        # to write. The worker reports it and keeps the pause: a pause is not a
+        # failure, and the next pass may well succeed.
+        class FailingReclaimSpool:
+            def __init__(self, wrapped: object) -> None:
+                self._wrapped = wrapped
+                self.calls = 0
+
+            @property
+            def path(self) -> Path:
+                return self._wrapped.path
+
+            def reclaim(self, *, max_pages: int) -> SpoolReclaim:
+                self.calls += 1
+                return SpoolReclaim(
+                    auto_vacuum=2,
+                    freed_pages=0,
+                    wal_truncated=False,
+                    error="OperationalError: disk I/O error",
+                )
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._wrapped, name)
+
+        filesystem = MutableFilesystem(total_bytes=1_000_000, free_bytes=500)
+        guard = FilesystemGuard(
+            min_free_bytes=100_000,
+            min_free_ratio=0.0,
+            usage_source=filesystem.usage,
+        )
+        spool_double: FailingReclaimSpool | None = None
+
+        def spool_factory() -> FailingReclaimSpool:
+            # Built on the worker thread: SQLite connections are thread-affine.
+            nonlocal spool_double
+            spool_double = FailingReclaimSpool(
+                StorageFailureSpool(self.open_spool(), StorageFailureScript())
+            )
+            return spool_double
+
+        service = self.service(
+            ScriptedTransport(),
+            spool_factory=spool_factory,
+            filesystem_guard=guard,
+        )
+        service.start(timeout_seconds=1)
+        self.assertTrue(service.submit(self.event(1)))
+        self.wait_for(
+            lambda: spool_double is not None and spool_double.calls >= 1
+        )
+        snapshot = service.snapshot()
+        self.assertEqual(snapshot.state, WorkerState.BLOCKED)
+        self.assertEqual(snapshot.block_reason, "disk_space")
+        self.assertTrue(snapshot.thread_alive)
+        self.assertGreaterEqual(snapshot.storage_blocks, 1)
+        service.stop(timeout_seconds=1)
+
+    def test_storage_block_keeps_every_accepted_event_until_stop(self) -> None:
+        script = StorageFailureScript(
+            SpoolDiskFullError("database or disk is full")
+        )
+        service = self.service(
+            ScriptedTransport(),
+            settings=self.settings(ingress_queue_capacity=2),
+            spool_factory=lambda: StorageFailureSpool(
+                self.open_spool(), script
+            ),
+        )
+        service.start(timeout_seconds=1)
+        for index in range(5):
+            service.submit(self.event(index))
+        self.wait_for(lambda: service.snapshot().state is WorkerState.BLOCKED)
+        snapshot = service.snapshot()
+        # Nothing is lost silently: while persistence is paused every event is
+        # either waiting in memory or was dropped at the ingress queue and
+        # counted there.
+        self.assertEqual(snapshot.persisted_events, 0)
+        self.assertEqual(
+            snapshot.held_unpersisted
+            + snapshot.ingress_queue_depth
+            + snapshot.overflowed_events,
+            5,
+        )
+        service.stop(timeout_seconds=0.05)
 
     def test_signal_loop_ignores_a_closed_loop(self) -> None:
         service = self.service(ScriptedTransport())

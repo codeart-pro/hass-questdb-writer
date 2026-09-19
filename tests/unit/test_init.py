@@ -16,8 +16,10 @@ from custom_components.hass_questdb_writer import (
 )
 from custom_components.hass_questdb_writer.const import (
     CONF_HOST,
+    CONF_HTTP_TIMEOUT_SECONDS,
     CONF_PORT,
     CONF_TABLE,
+    CONF_TLS_SELF_SIGNED,
     CONF_USE_TLS,
     PROVISIONAL_DELIVERY_BATCH_BYTES,
     PROVISIONAL_MAX_PENDING_BYTES,
@@ -72,6 +74,21 @@ class ConfigEntrySetupTests(unittest.IsolatedAsyncioTestCase):
             PROVISIONAL_DELIVERY_BATCH_BYTES,
         )
 
+    def test_connection_configuration_follows_entry_data_and_options(self) -> None:
+        # One resolution for worker, sensor, diagnostics and the config flow:
+        # the timeout comes from the options, the TLS policy from the data.
+        entry = self.entry()
+        entry.data[CONF_TLS_SELF_SIGNED] = True
+        entry.options[CONF_HTTP_TIMEOUT_SECONDS] = 7.5
+        hass = SimpleNamespace(config=FakeConfig(Path("/config")))
+        configuration = _runtime_configuration(  # type: ignore[arg-type]
+            hass, entry
+        )
+        self.assertEqual(configuration.connection.timeout_seconds, 7.5)
+        self.assertTrue(configuration.connection.tls_self_signed)
+        self.assertEqual(configuration.connection.host, "questdb")
+        self.assertIsNone(configuration.connection.username)
+
     async def test_setup_starts_before_publishing_runtime_data(self) -> None:
         hass = SimpleNamespace(
             config=FakeConfig(Path("/config")),
@@ -92,6 +109,32 @@ class ConfigEntrySetupTests(unittest.IsolatedAsyncioTestCase):
             )
         runtime.async_start.assert_awaited_once_with()
         self.assertIs(entry.runtime_data, runtime)
+
+    async def test_failed_platform_setup_stops_the_started_runtime(self) -> None:
+        # async_forward_entry_setups runs after the worker is up; sensor.py
+        # reads entry.runtime_data, so it cannot simply move later. HA keeps a
+        # failed entry out of async_unload_entry's reach (source: config_entries
+        # .py runs on_unload callbacks only), so the integration has to stop the
+        # runtime itself or the worker thread outlives the failed setup.
+        hass = SimpleNamespace(
+            config=FakeConfig(Path("/config")),
+            config_entries=Mock(
+                async_forward_entry_setups=AsyncMock(
+                    side_effect=RuntimeError("sensor platform failed")
+                ),
+            ),
+        )
+        entry = self.entry()
+        runtime = Mock()
+        runtime.async_start = AsyncMock()
+        runtime.async_stop = AsyncMock()
+        with patch(
+            "custom_components.hass_questdb_writer.HassQuestDbRuntime",
+            return_value=runtime,
+        ):
+            with self.assertRaises(RuntimeError):
+                await async_setup_entry(hass, entry)  # type: ignore[arg-type]
+        runtime.async_stop.assert_awaited_once_with()
 
     async def test_failed_setup_does_not_publish_runtime_data(self) -> None:
         hass = SimpleNamespace(config=FakeConfig(Path("/config")))
