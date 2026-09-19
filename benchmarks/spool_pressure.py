@@ -79,6 +79,46 @@ _PAYLOAD_SAMPLE_EVERY = 200
 _IDS_PER_QUERY = 300
 
 
+def _ids_present(transport: Any, table: str, ids: list[str], *, depth: int = 0) -> int:
+    """How many of these ids are at the destination.
+
+    A chunk query can fail for reasons that have nothing to do with the run - a
+    response the transport refuses, a server hiccup - so a failure is retried in
+    halves before the verification is declared invalid: invalidating the whole
+    run is only honest once the smaller queries failed too.
+    """
+    quoted = ", ".join(f"'{event_id}'" for event_id in ids)
+    try:
+        present = transport.exec_query(
+            f"select count_distinct(event_id) from {table} where event_id in ({quoted})"
+        )
+        return int(present["dataset"][0][0])
+    except Exception:
+        if depth >= 3 or len(ids) <= 5:
+            raise
+        middle = len(ids) // 2
+        return _ids_present(
+            transport, table, ids[:middle], depth=depth + 1
+        ) + _ids_present(transport, table, ids[middle:], depth=depth + 1)
+
+
+def _present_ids(transport: Any, table: str, ids: list[str], *, depth: int = 0) -> set[str]:
+    """Which of these ids are at the destination, for naming the missing ones."""
+    quoted = ", ".join(f"'{event_id}'" for event_id in ids)
+    try:
+        rows = transport.exec_query(
+            f"select distinct event_id from {table} where event_id in ({quoted})"
+        )
+        return {str(row[0]) for row in rows["dataset"]}
+    except Exception:
+        if depth >= 3 or len(ids) <= 5:
+            raise
+        middle = len(ids) // 2
+        return _present_ids(transport, table, ids[:middle], depth=depth + 1) | _present_ids(
+            transport, table, ids[middle:], depth=depth + 1
+        )
+
+
 class _VerificationFailure(RuntimeError):
     """A verification step that could not run, as opposed to one that found nothing."""
 
@@ -252,6 +292,20 @@ def _digest(path: Path) -> str:
         return "unavailable"
 
 
+def _tree_digest(directory: Path) -> str:
+    """A content digest over the Python sources of a tree.
+
+    A worktree mounted into a container has no git metadata to read, so a
+    revision alone cannot identify it: the digest identifies the code by content,
+    which is what an auditable artifact needs.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(directory.glob("*.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def _git_state(directory: Path, scope: Path | None = None) -> dict[str, Any]:
     """Revision and dirty flag of a checkout, for the provenance of a run.
 
@@ -356,10 +410,20 @@ def _startup_probe_on_full_filesystem(
                 busy_timeout_seconds=args.timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001 - the classification is the result
+            cause = exc.__cause__
             return {
                 "raised": type(exc).__name__,
                 "message": str(exc)[:200],
-                "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
+                # The classified error replaced the original one, so the code the
+                # storage produced is reported from the chain instead of being
+                # lost: without it the claim "a real SQLITE_CANTOPEN became this"
+                # would not be checkable from the artifact.
+                "raised_from": None
+                if cause is None
+                else {
+                    "type": type(cause).__name__,
+                    "sqlite_errorcode": getattr(cause, "sqlite_errorcode", None),
+                },
                 "filler_bytes": filler_bytes,
                 "fill_error": fill_error,
                 "free_bytes": free_bytes,
@@ -627,18 +691,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         missing_ids = []
         for start in range(0, len(verifiable_ids), _IDS_PER_QUERY):
             chunk = verifiable_ids[start : start + _IDS_PER_QUERY]
-            quoted = ", ".join(f"'{event_id}'" for event_id in chunk)
             try:
-                present = transport.exec_query(
-                    f"select count_distinct(event_id) from {args.table} "
-                    f"where event_id in ({quoted})"
-                )
-                if int(present["dataset"][0][0]) == len(chunk):
+                if _ids_present(transport, args.table, chunk) == len(chunk):
                     continue
-                rows = transport.exec_query(
-                    f"select distinct event_id from {args.table} "
-                    f"where event_id in ({quoted})"
-                )
+                arrived = _present_ids(transport, args.table, chunk)
             except Exception as exc:  # noqa: BLE001 - reported, not raised
                 # A verification that could not run must not look like a
                 # verification that found nothing: the count goes back to
@@ -647,7 +703,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise _VerificationFailure(
                     f"chunk {start}-{start + len(chunk)}: {type(exc).__name__}: {exc}"
                 ) from exc
-            arrived = {str(row[0]) for row in rows["dataset"]}
             missing_ids.extend(event_id for event_id in chunk if event_id not in arrived)
     except _VerificationFailure as exc:
         verification_error = str(exc)
@@ -737,6 +792,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # Provenance, so a baseline/fixed comparison is auditable from the
             # result file alone instead of relying on the reader's trust.
             "harness_sha256": _digest(Path(__file__)),
+            "component_sha256": _tree_digest(component_dir or COMPONENT),
             "harness_revision": _git_state(
                 Path(__file__).resolve().parent.parent, Path(__file__)
             ),
@@ -846,7 +902,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # observed before the writer was asked to stop, and the state of the
             # spool afterwards, which the shutdown flush may still change.
             "drained_before_shutdown": drained,
-            "drained_after_shutdown": spool_ids is not None and not spool_ids,
+            "spool_empty_after_shutdown": spool_ids is not None and not spool_ids,
             "delivered_events": recovered.delivered_events,
             "dead_lettered_events": final.dead_lettered_events,
             "storage_recoveries": recovered.storage_recoveries,

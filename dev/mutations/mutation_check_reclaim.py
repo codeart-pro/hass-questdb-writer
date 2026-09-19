@@ -7,6 +7,7 @@ the fix; the test that exists to protect that piece must go red.
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 
 TREE = pathlib.Path("/tmp/run")
@@ -66,8 +67,8 @@ MUTATIONS = [
     (
         "startup storage errors lose their classification",
         PKG / "spool.py",
-        'raise classify_storage_error(\n                exc, "failed to initialize SQLite spool"\n            ) from exc',
-        'raise SpoolError("failed to initialize SQLite spool") from exc',
+        "            raise classify_storage_error(\n                exc,\n                \"failed to initialize SQLite spool\",\n                self._free_bytes(),\n            ) from exc",
+        '            raise SpoolError("failed to initialize SQLite spool") from exc',
         ["tests/unit/test_spool.py", "-k", "open_classifies"],
     ),
     (
@@ -106,6 +107,10 @@ def main() -> None:
         print("restored:", all(p.read_text() == o for p, o in originals.items()))
 
 
+_FAILED = re.compile(r"\b\d+ failed\b")
+_ERRORS = re.compile(r"\b\d+ errors?\b")
+
+
 def _summary(output: str) -> str:
     return (output.strip().splitlines() or ["<no output>"])[-1]
 
@@ -115,17 +120,16 @@ def _verdict(result: subprocess.CompletedProcess[str]) -> str:
 
     A non-zero exit code is not enough: an import error, a collection error or a
     wrong test path exits non-zero without a single assertion having run, which
-    would report an infrastructure failure as a killed mutant.
+    would report an infrastructure failure as a killed mutant. The summary line is
+    matched by shape (`N failed`, `N errors`) instead of by the substring "error",
+    which any assertion message could contain.
     """
-    summary = _summary(result.stdout + result.stderr).lower()
+    summary = _summary(result.stdout + result.stderr)
     if result.returncode == 0:
         return "MISSED (still green!)"
-    infrastructure_markers = ("error", "no tests ran", "usage error", "interrupted")
-    if any(marker in summary for marker in infrastructure_markers):
-        return "UNDECIDED (infrastructure failure, not a killed mutant)"
-    if "failed" in summary:
-        return "CAUGHT (red)"
-    return "UNDECIDED (unrecognised outcome)"
+    if _ERRORS.search(summary) or not _FAILED.search(summary):
+        return "UNDECIDED (the selection did not run and fail)"
+    return "CAUGHT (red)"
 
 
 if __name__ == "__main__":

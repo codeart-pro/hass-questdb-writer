@@ -7,6 +7,7 @@ tests green means the test proves nothing about the behaviour.
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 
 TREE = pathlib.Path("/tmp/run")
@@ -66,6 +67,10 @@ def main() -> None:
         print("config_flow.py restored:", FLOW.read_text() == ORIGINAL)
 
 
+_FAILED = re.compile(r"\b\d+ failed\b")
+_ERRORS = re.compile(r"\b\d+ errors?\b")
+
+
 def _summary(output: str) -> str:
     return (output.strip().splitlines() or ["<no output>"])[-1]
 
@@ -75,17 +80,16 @@ def _verdict(result: subprocess.CompletedProcess[str]) -> str:
 
     A non-zero exit code is not enough: an import error, a collection error or a
     wrong test path exits non-zero without a single assertion having run, which
-    would report an infrastructure failure as a killed mutant.
+    would report an infrastructure failure as a killed mutant. The summary line is
+    matched by shape (`N failed`, `N errors`) instead of by the substring "error",
+    which any assertion message could contain.
     """
-    summary = _summary(result.stdout + result.stderr).lower()
+    summary = _summary(result.stdout + result.stderr)
     if result.returncode == 0:
         return "MISSED (still green!)"
-    infrastructure_markers = ("error", "no tests ran", "usage error", "interrupted")
-    if any(marker in summary for marker in infrastructure_markers):
-        return "UNDECIDED (infrastructure failure, not a killed mutant)"
-    if "failed" in summary:
-        return "CAUGHT (red)"
-    return "UNDECIDED (unrecognised outcome)"
+    if _ERRORS.search(summary) or not _FAILED.search(summary):
+        return "UNDECIDED (the selection did not run and fail)"
+    return "CAUGHT (red)"
 
 
 if __name__ == "__main__":
