@@ -168,6 +168,26 @@ def _user_schema(values: dict[str, Any]) -> vol.Schema:
     )
 
 
+def _connection_unique_id(data: dict[str, Any]) -> str:
+    """The destination identity of one connection configuration."""
+    scheme = "https" if data[CONF_USE_TLS] else "http"
+    return f"{scheme}://{data[CONF_HOST].lower()}:{data[CONF_PORT]}/{data[CONF_TABLE]}"
+
+
+def _reauth_schema(username: str | None) -> vol.Schema:
+    """The credentials-only form used by reauthentication (ADR-0012).
+
+    Host, port and table are deliberately absent: reauth repairs credentials,
+    and moving an entry to another destination is what Reconfigure is for.
+    """
+    return vol.Schema(
+        {
+            vol.Optional(CONF_USERNAME, default=username or ""): str,
+            vol.Optional(CONF_PASSWORD, default=""): str,
+        }
+    )
+
+
 def _filter_side(user_input: dict[str, Any], include: bool) -> dict[str, Any]:
     """Assemble one include/exclude side in the entity-filter schema shape."""
     if include:
@@ -427,12 +447,23 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         await self.hass.async_add_executor_job(transport.exec_query, "select 1")
 
+    def _form_schema(self, values: dict[str, Any]) -> vol.Schema:
+        """The form schema for the current step.
+
+        Reauthentication repairs credentials only (ADR-0012), so it shows the
+        credentials and nothing else; every other source shows the full
+        connection form.
+        """
+        if self.source == SOURCE_REAUTH:
+            return _reauth_schema(values.get(CONF_USERNAME))
+        return _user_schema(values)
+
     def _reject(
         self, step_id: str, user_input: dict[str, Any], error: str
     ) -> config_entries.ConfigFlowResult:
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_user_schema(user_input),
+            data_schema=self._form_schema(user_input),
             errors={"base": error},
         )
 
@@ -474,6 +505,15 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         elif self.source == SOURCE_REAUTH:
             source_entry = self._get_reauth_entry()
         if user_input is not None:
+            if self.source == SOURCE_REAUTH and source_entry is not None:
+                # Reauthentication repairs credentials only (ADR-0012): the
+                # destination comes from the entry, so neither the form nor a
+                # hand-made submit can move the writer to another host or table.
+                user_input = {
+                    **source_entry.data,
+                    CONF_USERNAME: user_input.get(CONF_USERNAME, ""),
+                    CONF_PASSWORD: user_input.get(CONF_PASSWORD, ""),
+                }
             host = user_input[CONF_HOST].strip()
             table = user_input[CONF_TABLE].strip()
             username = (user_input.get(CONF_USERNAME) or "").strip() or None
@@ -489,13 +529,13 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not host or not table or len(table.encode("utf-8")) > 127:
                 return self.async_show_form(
                     step_id=step_id,
-                    data_schema=_user_schema(user_input),
+                    data_schema=self._form_schema(user_input),
                     errors={"base": "invalid_connection"},
                 )
             if bool(username) != bool(password):
                 return self.async_show_form(
                     step_id=step_id,
-                    data_schema=_user_schema(user_input),
+                    data_schema=self._form_schema(user_input),
                     errors={"base": "invalid_auth_pair"},
                 )
             new_data = {
@@ -518,14 +558,30 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data=new_data,
                         reason="reauth_successful",
                     )
+                unique_id = _connection_unique_id(new_data)
+                if unique_id != source_entry.unique_id:
+                    # The entry moved to another destination, so its identity has
+                    # to move with it - otherwise a second entry could be added
+                    # for that destination while this one still claims the old
+                    # one, and unique-config-entry would quietly stop holding.
+                    if any(
+                        entry.unique_id == unique_id
+                        for entry in self.hass.config_entries.async_entries(
+                            self.handler
+                        )
+                        if entry.entry_id != source_entry.entry_id
+                    ):
+                        return self.async_abort(reason="already_configured")
+                    return self.async_update_reload_and_abort(
+                        source_entry,
+                        data=new_data,
+                        unique_id=unique_id,
+                    )
                 return self.async_update_reload_and_abort(
                     source_entry,
                     data=new_data,
                 )
-            scheme = "https" if user_input[CONF_USE_TLS] else "http"
-            await self.async_set_unique_id(
-                f"{scheme}://{host.lower()}:{user_input[CONF_PORT]}/{table}"
-            )
+            await self.async_set_unique_id(_connection_unique_id(new_data))
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
                 title=f"QuestDB at {host}",
@@ -538,7 +594,7 @@ class HassQuestDbWriterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else {}
         )
         return self.async_show_form(
-            step_id=step_id, data_schema=_user_schema(defaults)
+            step_id=step_id, data_schema=self._form_schema(defaults)
         )
 
     @staticmethod

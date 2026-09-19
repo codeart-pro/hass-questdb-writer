@@ -358,7 +358,13 @@ owns:
 
 The connection parameters can be changed at any time through the
 **Reconfigure** flow (reuses the user step; empty credential fields keep
-the stored secret). Options are changed through **Configure**.
+the stored secret). A reconfigure that moves the entry to another destination
+also moves its unique identity with it, and aborts when another entry already
+claims that destination. **Reauthentication** - the repair flow Home Assistant
+offers when the writer reports rejected credentials (ADR-0012) - shows a
+credentials-only form: the destination is taken from the entry, so repairing a
+password can never move the writer elsewhere. Options are changed through
+**Configure**.
 
 The options flow owns:
 

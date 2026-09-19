@@ -21,6 +21,7 @@ from homeassistant.config_entries import (
     SOURCE_USER,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import InvalidData
 
 from custom_components.hass_questdb_writer.const import (
     CONF_HOST,
@@ -204,15 +205,27 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active[0]["handler"], DOMAIN)
         self.assertEqual(active[0]["step_id"], "reauth_confirm")
 
+        # The dialog repairs credentials and cannot move the entry: Home
+        # Assistant validates the submitted data against the step's schema, and
+        # the reauth schema no longer carries the destination fields.
+        with self.assertRaises(InvalidData):
+            await self.hass.config_entries.flow.async_configure(
+                active[0]["flow_id"],
+                {
+                    CONF_HOST: "somewhere-else",
+                    CONF_PORT: self.port,
+                    CONF_TABLE: self.table,
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                },
+            )
+
         # Completing the flow validates the credentials against real QuestDB,
         # stores them and reloads the entry.
         finished = await self.hass.config_entries.flow.async_configure(
             active[0]["flow_id"],
             {
-                CONF_HOST: self.host,
-                CONF_PORT: self.port,
-                CONF_TABLE: self.table,
-                CONF_USE_TLS: False,
                 CONF_USERNAME: "",
                 CONF_PASSWORD: "",
             },
@@ -221,6 +234,8 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finished["reason"], "reauth_successful")
         await self.hass.async_block_till_done()
         self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        self.assertEqual(entry.data[CONF_HOST], self.host)
+        self.assertEqual(entry.data[CONF_TABLE], self.table)
         self.assertEqual(
             list(entry.async_get_active_flows(self.hass, {SOURCE_REAUTH})), []
         )

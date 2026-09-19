@@ -115,7 +115,10 @@ rules:
     status: done
     comment: >-
       The user flow calls async_set_unique_id(host, port, table) and aborts with
-      _abort_if_unique_id_configured (config_flow.py).
+      _abort_if_unique_id_configured (config_flow.py). A reconfigure that moves
+      the entry to another destination recomputes that identity, aborts when
+      another entry already claims it, and passes it to
+      async_update_reload_and_abort, so the guarantee survives a reconfigure.
 
   # ------------------------------------------------------------------ Silver
   action-exceptions:

@@ -151,13 +151,20 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"][CONF_HOST], "QuestDB")
         self.assertEqual(result["data"][CONF_TABLE], "events")
 
-    def _reconfigure_flow(self, entry_data: dict) -> HassQuestDbWriterConfigFlow:
-        entry = Mock(data=entry_data)
+    def _reconfigure_flow(
+        self,
+        entry_data: dict,
+        *,
+        unique_id: str = "http://questdb:9000/events",
+        other_entries: list | None = None,
+    ) -> HassQuestDbWriterConfigFlow:
+        entry = Mock(data=entry_data, entry_id="entry-1", unique_id=unique_id)
         flow = HassQuestDbWriterConfigFlow()
         flow.context = {"source": SOURCE_RECONFIGURE, "entry_id": "entry-1"}
         flow.hass = Mock(
             config_entries=Mock(
-                async_get_known_entry=Mock(return_value=entry)
+                async_get_known_entry=Mock(return_value=entry),
+                async_entries=Mock(return_value=list(other_entries or [])),
             )
         )
         return flow
@@ -200,6 +207,102 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         defaults = result["data_schema"]({})
         self.assertEqual(defaults[CONF_USERNAME], "")
         self.assertEqual(defaults[CONF_PASSWORD], "")
+
+    async def test_reconfigure_moves_the_unique_id_with_the_destination(
+        self,
+    ) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "secret",
+            }
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb2",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "prod",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertEqual(
+            update.call_args.kwargs["unique_id"], "https://questdb2:9001/prod"
+        )
+
+    async def test_reconfigure_keeping_the_destination_keeps_the_identity(
+        self,
+    ) -> None:
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            }
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb",
+                    CONF_PORT: 9000,
+                    CONF_TABLE: "events",
+                    CONF_USE_TLS: False,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertNotIn("unique_id", update.call_args.kwargs)
+
+    async def test_reconfigure_aborts_when_another_entry_owns_the_destination(
+        self,
+    ) -> None:
+        other = Mock(entry_id="entry-2", unique_id="https://questdb2:9001/prod")
+        flow = self._reconfigure_flow(
+            {
+                CONF_HOST: "questdb",
+                CONF_PORT: 9000,
+                CONF_TABLE: "events",
+                CONF_USE_TLS: False,
+                CONF_USERNAME: None,
+                CONF_PASSWORD: None,
+            },
+            other_entries=[other],
+        )
+        update = Mock(return_value={"type": "abort", "reason": "reconfigure_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            result = await flow.async_step_user(
+                {
+                    CONF_HOST: "questdb2",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "prod",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "",
+                    CONF_PASSWORD: "",
+                }
+            )
+        self.assertEqual(result["type"], "abort")
+        self.assertEqual(result["reason"], "already_configured")
+        update.assert_not_called()
 
     async def test_reconfigure_updates_entry_and_keeps_stored_secret(self) -> None:
         flow = self._reconfigure_flow(
@@ -338,16 +441,48 @@ class ReauthFlowTests(unittest.IsolatedAsyncioTestCase):
             CONF_PASSWORD: "secret",
         }
 
-    async def test_reauth_prefills_connection_and_hides_password(self) -> None:
+    async def test_reauth_prefills_credentials_only(self) -> None:
         flow = self._reauth_flow(self.stored_entry_data())
         result = await flow.async_step_reauth({})
         self.assertEqual(result["type"], "form")
         self.assertEqual(result["step_id"], "reauth_confirm")
+        schema = result["data_schema"].schema
+        # Reauth repairs credentials; the destination is not editable here.
+        self.assertNotIn(CONF_HOST, schema)
+        self.assertNotIn(CONF_PORT, schema)
+        self.assertNotIn(CONF_TABLE, schema)
+        self.assertNotIn(CONF_USE_TLS, schema)
         defaults = result["data_schema"]({})
-        self.assertEqual(defaults[CONF_HOST], "questdb")
-        self.assertEqual(defaults[CONF_PORT], 9000)
         self.assertEqual(defaults[CONF_USERNAME], "admin")
         self.assertEqual(defaults[CONF_PASSWORD], "")
+
+    async def test_reauth_cannot_move_the_entry_to_another_destination(
+        self,
+    ) -> None:
+        flow = self._reauth_flow(self.stored_entry_data())
+        update = Mock(return_value={"type": "abort", "reason": "reauth_successful"})
+        with (
+            patch.object(flow, "async_update_reload_and_abort", update),
+            patch.object(flow, "_test_connection", AsyncMock()),
+        ):
+            await flow.async_step_reauth_confirm(
+                {
+                    CONF_HOST: "someone-elses-nas",
+                    CONF_PORT: 9001,
+                    CONF_TABLE: "prod",
+                    CONF_USE_TLS: True,
+                    CONF_USERNAME: "admin",
+                    CONF_PASSWORD: "new-secret",
+                }
+            )
+        update.assert_called_once()
+        stored = update.call_args.kwargs["data"]
+        self.assertEqual(stored[CONF_HOST], "questdb")
+        self.assertEqual(stored[CONF_PORT], 9000)
+        self.assertEqual(stored[CONF_TABLE], "events")
+        self.assertFalse(stored[CONF_USE_TLS])
+        self.assertEqual(stored[CONF_PASSWORD], "new-secret")
+        self.assertNotIn("unique_id", update.call_args.kwargs)
 
     async def test_reauth_keeps_stored_secret_when_password_is_empty(
         self,
