@@ -86,6 +86,12 @@ The envelope contains a generated event ID, entity ID, state, selected state
 metadata, attributes, HA event timestamp, and ingestion timestamp. It contains
 plain serializable values and no live Home Assistant objects.
 
+Measured cost of this path: 14-26 µs per event on average (3.5-6.0 µs of it
+building and validating the envelope, worst p99 0.13 ms across payload sizes),
+i.e. under 1 % of the loop time available at the measured 61 events/s peak; the
+`json.loads` validation inside `__post_init__` is kept for that price. See
+[benchmarks/listener-cost.md](benchmarks/listener-cost.md).
+
 Before entering the bounded queue, the envelope is serialized as versioned,
 deterministic UTF-8 JSON. The worker stores those exact bytes in SQLite and
 only converts them to ILP when constructing a delivery batch. Consequently, a
