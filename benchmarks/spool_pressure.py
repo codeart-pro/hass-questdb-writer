@@ -44,6 +44,7 @@ import resource
 import select
 import shutil
 import socket
+import sqlite3
 import sys
 import threading
 import time
@@ -66,22 +67,36 @@ _MEASURED_MODULES = (
     "worker",
 )
 
+# Every n-th submitted event has its serialized spool payload measured, so the
+# report can state the real size instead of the requested one.
+_PAYLOAD_SAMPLE_EVERY = 200
 
-def load_component() -> dict[str, Any]:
+# How many accepted ids are checked for actual presence at the destination. The
+# enumeration of every id would return a response the transport refuses, so the
+# identity oracle aggregates on the server and spot-checks membership.
+_SAMPLE_IDS = 200
+
+
+def load_component(component_dir: Path | None = None) -> dict[str, Any]:
     """Import the component's Home-Assistant-free modules under a synthetic package.
 
     Modules already pulled in by a relative import are reused instead of executed
     again: `worker` imports `event`, and re-executing a module would register a
     second module object whose classes no longer match the ones already captured.
+
+    `component_dir` points the same harness at another revision of the package
+    (a `git worktree` of the commit under comparison), which is what makes a
+    before/after comparison a comparison of revisions rather than of conditions.
     """
+    directory = component_dir or COMPONENT
     package = types.ModuleType("hqw")
-    package.__path__ = [str(COMPONENT)]
+    package.__path__ = [str(directory)]
     sys.modules["hqw"] = package
     for name in _MEASURED_MODULES:
         if f"hqw.{name}" in sys.modules:
             continue
         spec = importlib.util.spec_from_file_location(
-            f"hqw.{name}", COMPONENT / f"{name}.py"
+            f"hqw.{name}", directory / f"{name}.py"
         )
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
@@ -224,17 +239,23 @@ def _size_of(path: Path) -> int:
 
 def _reset_table(
     modules: dict[str, Any], args: argparse.Namespace, transport_kwargs: dict[str, Any]
-) -> None:
-    """Drop the verification table so the row count belongs to this run only."""
+) -> str | None:
+    """Drop the verification table; returns an error text instead of raising.
+
+    A failed reset invalidates the run: old rows would enter the row counts and
+    the identity oracle, and a verdict computed over them is not a verdict about
+    this run (reported as `reset_error`, which fails the final verdict).
+    """
     transport = modules["transport"].IlpHttpTransport(
         args.questdb_host, args.questdb_port, **transport_kwargs
     )
     try:
         transport.exec_query(f"drop table if exists {args.table}")
-    except Exception as exc:  # noqa: BLE001 - a missing table must not stop the run
-        print(f"could not reset {args.table}: {type(exc).__name__}: {exc}")
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        return f"{type(exc).__name__}: {exc}"
     finally:
         transport.close()
+    return None
 
 
 def make_envelope(event_module: Any, index: int, payload_bytes: int) -> Any:
@@ -262,7 +283,8 @@ def make_envelope(event_module: Any, index: int, payload_bytes: int) -> Any:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    modules = load_component()
+    component_dir = Path(args.component_dir) if args.component_dir else None
+    modules = load_component(component_dir)
     spool_dir = Path(args.spool_dir)
     db_path = spool_dir / args.db_name
     for leftover in (db_path, db_path.with_name(db_path.name + "-wal")):
@@ -330,28 +352,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     usage_before = shutil.disk_usage(spool_dir)
-    _reset_table(modules, args, transport_kwargs)
+    reset_error = _reset_table(modules, args, transport_kwargs)
     service.start(timeout_seconds=10)
     sampler.start()
 
     # Phase 1: delivery is impossible, events keep arriving.
     counters = {"attempted": 0, "submitted": 0, "overflowed": 0}
+    accepted_ids: set[str] = set()
+    payload_sizes: list[int] = []
 
-    def pump(baseline_time: float, baseline_attempted: int) -> None:
+    def pump(baseline_time: float, baseline_attempted: int, rate: float) -> None:
         """Submit every event the configured rate says is due by now.
 
         A real installation keeps firing events while its disk is full, so the
-        blocked-state measurement below must keep submitting too.
+        blocked-state measurement below keeps submitting too - optionally at a
+        lower rate, which is how the production event rates are measured instead
+        of extrapolated.
         """
-        due = int((time.monotonic() - baseline_time) * args.event_rate) - (
+        due = int((time.monotonic() - baseline_time) * rate) - (
             counters["attempted"] - baseline_attempted
         )
         for _ in range(max(0, due)):
-            envelope = make_envelope(
-                modules["event"], counters["attempted"], args.payload_bytes
-            )
+            index = counters["attempted"]
+            envelope = make_envelope(modules["event"], index, args.payload_bytes)
+            if index % _PAYLOAD_SAMPLE_EVERY == 0:
+                payload_sizes.append(len(envelope.to_spool_event().payload))
             if service.submit(envelope):
                 counters["submitted"] += 1
+                accepted_ids.add(f"{index:032d}")
             else:
                 counters["overflowed"] += 1
             counters["attempted"] += 1
@@ -359,7 +387,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     outage_started = time.monotonic()
     block_reason: str | None = None
     while True:
-        pump(outage_started, 0)
+        pump(outage_started, 0, args.event_rate)
         elapsed = time.monotonic() - outage_started
         snapshot = service.snapshot()
         if snapshot.block_reason is not None:
@@ -380,7 +408,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     blocks_at_entry = service.snapshot().storage_blocks
     blocked_entry_attempted = counters["attempted"]
     while time.monotonic() - blocked_started < args.blocked_seconds:
-        pump(blocked_started, blocked_entry_attempted)
+        pump(blocked_started, blocked_entry_attempted, args.blocked_rate)
         time.sleep(0.005)
     blocked_seconds = time.monotonic() - blocked_started
     blocked = service.snapshot()
@@ -411,16 +439,61 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     shutdown_cpu = cpu_seconds() - stop_cpu_before
     final = service.snapshot()
 
-    # Counted after the shutdown flush, so the number covers everything the
-    # writer ever persisted - including the events it had to free space for.
+    # Verification reads the destination and the spool directly instead of
+    # trusting the writer's counters: identity is what has to survive, and a row
+    # count cannot tell a re-delivered event from a lost one, because a resend of
+    # another event can hold the total up while one event is missing. The verdict
+    # below therefore compares distinct event ids, not row counts.
+    verification_error: str | None = None
+    rows_in_questdb: int | None = None
+    distinct_delivered: int | None = None
+    sampled_present: int | None = None
+
+    # The spool is read before the queries so the id sample can exclude the
+    # events the writer is still holding: sampled ids are the ones that have to
+    # be at the destination, so a missing sample is a loss and not a queued
+    # event.
+    spool_ids: set[str] | None = None
+    try:
+        connection = sqlite3.connect(db_path)
+        try:
+            spool_ids = {
+                str(row[0])
+                for row in connection.execute("select event_id from pending")
+            }
+        finally:
+            connection.close()
+    except sqlite3.Error as exc:
+        verification_error = f"{type(exc).__name__}: {exc}"
+    verifiable_ids = sorted(accepted_ids - (spool_ids or set()))
+    sample_ids = verifiable_ids[:: max(1, len(verifiable_ids) // _SAMPLE_IDS)][
+        :_SAMPLE_IDS
+    ]
     transport = modules["transport"].IlpHttpTransport(
         args.questdb_host, args.questdb_port, **transport_kwargs
     )
-    rows_in_questdb = None
-    with contextlib.suppress(Exception):
-        result = transport.exec_query(f"select count() from {args.table}")
-        rows_in_questdb = int(result["dataset"][0][0])
-    transport.close()
+    try:
+        raw = transport.exec_query(f"select count() from {args.table}")
+        rows_in_questdb = int(raw["dataset"][0][0])
+        # Aggregates instead of enumerating every id: the destination returns a
+        # bounded response, and a distinct count cannot be inflated by
+        # re-delivery the way a row count can.
+        distinct = transport.exec_query(
+            f"select count_distinct(event_id) from {args.table}"
+        )
+        distinct_delivered = int(distinct["dataset"][0][0])
+        if sample_ids:
+            quoted = ", ".join(f"'{event_id}'" for event_id in sample_ids)
+            sample = transport.exec_query(
+                f"select count_distinct(event_id) from {args.table} "
+                f"where event_id in ({quoted})"
+            )
+            sampled_present = int(sample["dataset"][0][0])
+    except Exception as exc:  # noqa: BLE001 - reported as a verification failure
+        verification_error = f"{type(exc).__name__}: {exc}"
+    finally:
+        transport.close()
+
     sampler.stop()
     sampler.join(timeout=5)
     forwarder.close()
@@ -454,17 +527,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             writer.writeheader()
             writer.writerows(samples)
 
-    # At-least-once, stated as the invariant that matters: every persisted event
-    # reached QuestDB or is still durable in the spool, and nothing went to the
-    # dead letter. Re-delivery after an uncertain request can duplicate rows, so
-    # the count is a lower bound, not an equality.
-    delivered_or_durable = (
-        None if rows_in_questdb is None else rows_in_questdb + final.pending_rows
-    )
+    # The facts that have to hold for at-least-once: every accepted event is
+    # delivered or still durable, no row is stored twice, and a sample of the
+    # accepted ids is really present. A failed reset or a failed query makes the
+    # whole verification invalid rather than silently optimistic.
+    identity_counts_agree: bool | None = None
+    unaccounted_events: int | None = None
+    duplicate_rows_in_table: int | None = None
+    sample_missing: int | None = None
+    if distinct_delivered is not None and spool_ids is not None:
+        identity_counts_agree = (
+            distinct_delivered + len(spool_ids) == final.persisted_events
+        )
+        unaccounted_events = (
+            len(accepted_ids) - distinct_delivered - len(spool_ids)
+        )
+        if rows_in_questdb is not None:
+            duplicate_rows_in_table = rows_in_questdb - distinct_delivered
+        if sampled_present is not None:
+            sample_missing = len(sample_ids) - sampled_present
     nothing_lost = (
-        final.dead_lettered_events == 0
-        and delivered_or_durable is not None
-        and delivered_or_durable >= final.persisted_events
+        reset_error is None
+        and verification_error is None
+        and final.dead_lettered_events == 0
+        and identity_counts_agree is True
+        and unaccounted_events == 0
+        and duplicate_rows_in_table == 0
+        and sample_missing is not None
+        and sample_missing <= unaccounted_events
     )
     return {
         "environment": {
@@ -475,7 +565,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "parameters": {
             "event_rate_per_second": args.event_rate,
+            "blocked_rate_per_second": args.blocked_rate,
             "payload_bytes": args.payload_bytes,
+            "component_dir": str(component_dir or COMPONENT),
             "max_pending_rows": args.max_pending_rows,
             "max_pending_bytes": args.max_pending_bytes,
             "min_free_bytes": args.min_free_bytes,
@@ -525,6 +617,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "bytes_per_pending_byte": ratio_bytes_per_pending_byte,
             "bytes_per_pending_row": ratio_bytes_per_row,
         },
+        "identity": {
+            "distinct_events_in_questdb": distinct_delivered,
+            "events_still_in_spool": None if spool_ids is None else len(spool_ids),
+            "accepted_events": len(accepted_ids),
+            "persisted_events": final.persisted_events,
+            "unaccounted_events": unaccounted_events,
+            "counts_agree": identity_counts_agree,
+            "duplicate_rows_in_table": duplicate_rows_in_table,
+            "raw_rows_in_questdb": rows_in_questdb,
+            "sampled_ids": len(sample_ids),
+            "sample_missing": sample_missing,
+        },
+        "payload": {
+            "requested_bytes": args.payload_bytes,
+            "samples": len(payload_sizes),
+            "mean_bytes": (
+                round(sum(payload_sizes) / len(payload_sizes), 1)
+                if payload_sizes
+                else None
+            ),
+            "min_bytes": min(payload_sizes) if payload_sizes else None,
+            "max_bytes": max(payload_sizes) if payload_sizes else None,
+        },
+        "verification": {
+            "reset_error": reset_error,
+            "verification_error": verification_error,
+        },
         "recovery": {
             "seconds_to_drain": round(recovery_seconds, 3),
             "drained": drained,
@@ -534,11 +653,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "rows_in_questdb": rows_in_questdb,
             "rows_still_in_spool": final.pending_rows,
             "final_persisted_events": final.persisted_events,
-            "re_delivered_rows": (
-                None
-                if delivered_or_durable is None
-                else delivered_or_durable - final.persisted_events
-            ),
             "final_db_bytes": final_db,
             "final_wal_bytes": final_wal,
             "space_returned_bytes": usage_after.free - usage_before.free,
@@ -573,7 +687,20 @@ def main() -> None:
     parser.add_argument("--questdb-host", default="questdb")
     parser.add_argument("--questdb-port", type=int, default=9000)
     parser.add_argument("--table", default="hass_pressure_test")
+    parser.add_argument(
+        "--component-dir",
+        default=None,
+        help="directory holding the package revision under test (default: this "
+        "repository); point it at a worktree to compare revisions",
+    )
     parser.add_argument("--event-rate", type=float, default=1_000.0)
+    parser.add_argument(
+        "--blocked-rate",
+        type=float,
+        default=None,
+        help="events/s offered while the pause is measured (default: --event-rate); "
+        "use the production rates to measure instead of extrapolate",
+    )
     parser.add_argument("--payload-bytes", type=int, default=2_011)
     parser.add_argument("--max-events", type=int, default=2_000_000)
     parser.add_argument("--max-seconds", type=float, default=600.0)
@@ -592,6 +719,8 @@ def main() -> None:
     parser.add_argument("--min-free-ratio", type=float, default=0.25)
     parser.add_argument("--samples-csv", default="/tmp/spool_pressure_samples.csv")
     arguments = parser.parse_args()
+    if arguments.blocked_rate is None:
+        arguments.blocked_rate = arguments.event_rate
 
     print(json.dumps(run(arguments), indent=2))
 
