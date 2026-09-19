@@ -72,11 +72,24 @@ class BatchLimitTooSmallError(SpoolError):
     """The oldest event cannot fit in an otherwise empty batch."""
 
 
+def _primary_sqlite_code(code: int) -> int:
+    """The primary result code, with any extended part removed.
+
+    SQLite encodes an extended result code as `primary | (n << 8)`, and Python
+    reports the extended one when it has it: `SQLITE_CANTOPEN_FULLPATH` and
+    `SQLITE_IOERR_FSTAT` stand for the same conditions as `SQLITE_CANTOPEN` and
+    `SQLITE_IOERR`. Matching only the primary codes would have missed exactly
+    those - which is how a real filesystem with nothing left reported a bare error
+    where it should have named the condition.
+    """
+    return code & 0xFF
+
+
 # SQLITE_READONLY covers the plain read-only case; the extended codes are what
 # SQLite reports when the filesystem or the database file changed underneath an
 # open connection - all of them mean "this storage cannot be written now".
 _READ_ONLY_SQLITE_CODES: Final = frozenset(
-    code
+    _primary_sqlite_code(code)
     for code in (
         getattr(sqlite3, "SQLITE_READONLY", None),
         getattr(sqlite3, "SQLITE_READONLY_RECOVERY", None),
@@ -93,7 +106,7 @@ _READ_ONLY_SQLITE_CODES: Final = frozenset(
 # what a filesystem with nothing left looks like before it gets as far as
 # SQLITE_FULL. Measured on a real tmpfs by benchmarks/spool_pressure.py.
 _OUT_OF_SPACE_SQLITE_CODES: Final = frozenset(
-    code
+    _primary_sqlite_code(code)
     for code in (
         getattr(sqlite3, "SQLITE_CANTOPEN", None),
         getattr(sqlite3, "SQLITE_IOERR", None),
@@ -125,12 +138,13 @@ def classify_storage_error(
     problem, and a plain error is the honest answer.
     """
     code = getattr(exc, "sqlite_errorcode", None)
-    if code is not None and code == getattr(sqlite3, "SQLITE_FULL", None):
+    primary = None if code is None else _primary_sqlite_code(code)
+    if primary is not None and primary == getattr(sqlite3, "SQLITE_FULL", None):
         return SpoolDiskFullError(f"{message}: database or disk is full")
-    if code in _READ_ONLY_SQLITE_CODES:
+    if primary in _READ_ONLY_SQLITE_CODES:
         return SpoolReadOnlyError(f"{message}: database or filesystem is read-only")
     if (
-        code in _OUT_OF_SPACE_SQLITE_CODES
+        primary in _OUT_OF_SPACE_SQLITE_CODES
         and free_bytes is not None
         and free_bytes < _OUT_OF_SPACE_FREE_BYTES
     ):

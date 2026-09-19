@@ -786,6 +786,11 @@ class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
         class _CannotOpen(sqlite3.OperationalError):
             sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
 
+        class _CannotOpenExtended(sqlite3.OperationalError):
+            # What a real filesystem reports: the extended code, not the primary
+            # one. Matching primary codes only would have missed it.
+            sqlite_errorcode = sqlite3.SQLITE_CANTOPEN | (15 << 8)
+
         error = _CannotOpen("unable to open database file")
         self.assertIsInstance(
             classify_storage_error(error, "open", 0), SpoolDiskFullError
@@ -793,8 +798,10 @@ class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
         self.assertIsInstance(
             classify_storage_error(error, "open", 8 * 1024 * 1024), SpoolError
         )
-        self.assertEqual(
-            type(classify_storage_error(error, "open")), SpoolError
+        self.assertEqual(type(classify_storage_error(error, "open")), SpoolError)
+        self.assertIsInstance(
+            classify_storage_error(_CannotOpenExtended("unable to open"), "open", 0),
+            SpoolDiskFullError,
         )
 
     def test_reclaim_returns_space_to_the_filesystem(self) -> None:

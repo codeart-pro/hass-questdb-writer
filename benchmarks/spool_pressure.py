@@ -79,6 +79,10 @@ _PAYLOAD_SAMPLE_EVERY = 200
 _IDS_PER_QUERY = 300
 
 
+class _VerificationFailure(RuntimeError):
+    """A verification step that could not run, as opposed to one that found nothing."""
+
+
 def load_component(component_dir: Path | None = None) -> dict[str, Any]:
     """Import the component's Home-Assistant-free modules under a synthetic package.
 
@@ -355,6 +359,7 @@ def _startup_probe_on_full_filesystem(
             return {
                 "raised": type(exc).__name__,
                 "message": str(exc)[:200],
+                "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
                 "filler_bytes": filler_bytes,
                 "fill_error": fill_error,
                 "free_bytes": free_bytes,
@@ -623,18 +628,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for start in range(0, len(verifiable_ids), _IDS_PER_QUERY):
             chunk = verifiable_ids[start : start + _IDS_PER_QUERY]
             quoted = ", ".join(f"'{event_id}'" for event_id in chunk)
-            present = transport.exec_query(
-                f"select count_distinct(event_id) from {args.table} "
-                f"where event_id in ({quoted})"
-            )
-            if int(present["dataset"][0][0]) == len(chunk):
-                continue
-            rows = transport.exec_query(
-                f"select distinct event_id from {args.table} "
-                f"where event_id in ({quoted})"
-            )
+            try:
+                present = transport.exec_query(
+                    f"select count_distinct(event_id) from {args.table} "
+                    f"where event_id in ({quoted})"
+                )
+                if int(present["dataset"][0][0]) == len(chunk):
+                    continue
+                rows = transport.exec_query(
+                    f"select distinct event_id from {args.table} "
+                    f"where event_id in ({quoted})"
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                # A verification that could not run must not look like a
+                # verification that found nothing: the count goes back to
+                # unknown and the verdict is invalidated by `verification_error`.
+                missing_ids = None
+                raise _VerificationFailure(
+                    f"chunk {start}-{start + len(chunk)}: {type(exc).__name__}: {exc}"
+                ) from exc
             arrived = {str(row[0]) for row in rows["dataset"]}
             missing_ids.extend(event_id for event_id in chunk if event_id not in arrived)
+    except _VerificationFailure as exc:
+        verification_error = str(exc)
     except Exception as exc:  # noqa: BLE001 - reported as a verification failure
         verification_error = f"{type(exc).__name__}: {exc}"
     finally:
