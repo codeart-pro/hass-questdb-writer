@@ -3,9 +3,13 @@
 Date: 2026-09-19
 
 Two worked examples of a Grafana time-series panel on the `hass` table: one
-reading a value from `state`, one reading it from `attributes`. The query bodies
-were run against QuestDB 10.0.1 with the entity ids of a live installation, and
-they use only what the
+reading a value from `state`, one reading it from `attributes`, plus a
+categorical-state mapping and the downsampling variant. The query bodies were run
+against QuestDB 10.0.1 with the entity ids of a live installation, and the macro
+forms were run through the plugin itself on a real dashboard (`/api/ds/query`
+returned 674 points for the raw series and 669 buckets for the aggregated one),
+so both `$__timeFilter` and `$__sampleByInterval` are verified where they are
+expanded, not only in their documented shape. Everything below uses only what the
 [official QuestDB plugin](https://grafana.com/grafana/plugins/questdb-questdb-datasource/)
 documents ([Grafana guide](https://questdb.com/docs/integrations/visualization/grafana/),
 [JSON functions](https://questdb.com/docs/query/functions/json/)).
@@ -95,6 +99,53 @@ What matters here:
 - Any JSON type converts, not just numbers: the same path syntax `$.field[0]`
   reaches arrays, and `::varchar`/`::boolean`/`::timestamp` are available for the
   other shapes (see the JSON reference above).
+
+## Example 3 — a categorical state, as a number
+
+`binary_sensor`, `sun.sun`, a thermostat's mode: the row is text, and a number is
+what a graph, a threshold or an average needs. `CASE` maps the categories, and
+anything unmapped falls through:
+
+```sql
+SELECT
+  last_updated AS time,
+  CAST(CASE WHEN state = 'on' THEN 1 WHEN state = 'off' THEN 0 END AS DOUBLE) AS value
+FROM hass
+WHERE entity_id = 'binary_sensor.example_motion'
+  AND $__timeFilter(last_updated)
+ORDER BY last_updated
+```
+
+What matters here:
+
+- **Without `ELSE`, an unmapped state becomes `NULL`** — the QuestDB `CASE`
+  documentation is explicit about it, and it is what you want here: a motion
+  sensor that goes `unavailable` should show a gap, not a `0` that reads as "no
+  motion". Verified on a live entity whose states are `on` (5,275 rows), `off`
+  (5,278) and `unavailable` (6): the mapping produced `1.0` and `0.0` and left
+  nothing else behind, because in that window every row was `on` or `off`.
+- Add `WHEN state = 'unavailable' THEN 0` only if the panel must stay continuous
+  — and then say so in the panel description, because the graph will no longer
+  distinguish "not moving" from "not reporting".
+- **Aggregate the same mapping** to get a ratio over time, which is often the
+  more useful panel for a sensor that toggles:
+
+  ```sql
+  SELECT
+    last_updated AS time,
+    avg(CASE WHEN state = 'on' THEN 1.0 WHEN state = 'off' THEN 0.0 END) AS on_ratio
+  FROM hass
+  WHERE entity_id = 'binary_sensor.example_motion'
+    AND $__timeFilter(last_updated)
+  SAMPLE BY $__sampleByInterval
+  ```
+
+  Verified on a live entity: an hour of a busy motion sensor came back as
+  `0.50`-`0.51`, i.e. the share of the hour it was `on`.
+- If the exact category matters more than a number (a door's `open`/`closed`, a
+  thermostat's mode), Grafana's **state timeline** panel can consume the `state`
+  text directly — no `CASE` at all. The mapping above is for panels that need a
+  number.
 
 ## Long ranges: let the plugin choose the interval
 
