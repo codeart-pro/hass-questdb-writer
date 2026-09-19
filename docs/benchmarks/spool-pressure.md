@@ -82,15 +82,20 @@ distinct event id for that state change.
 
 Two properties are probed rather than assumed:
 
-- **The startup condition on real storage.** After the blocked window the harness
-  fills the tmpfs until the write itself fails with `ENOSPC`, opens a fresh spool
-  on it and records what the spool reports (`startup_on_full_filesystem`). A test
-  cannot do this: `PRAGMA max_page_count` is per connection, and a test cannot
-  fill a filesystem.
+- **The startup condition on real storage.** After every timing above has been
+  measured, the harness fills the tmpfs until the write itself fails with
+  `ENOSPC`, opens a fresh spool on it and records what the spool reports
+  (`startup_on_full_filesystem`). The probe is last on purpose: it is destructive
+  for the filesystem, so it must not sit inside a window whose duration is
+  published. A test cannot do this at all: `PRAGMA max_page_count` is per
+  connection, and a test cannot fill a filesystem.
 - **What the writer did while it was measured.** Every sample carries the writer's
   state, so the result is reported per state (`state_seconds`,
   `cpu_seconds_in_blocked_state`) instead of attributing a whole window to one
-  state.
+  state. The attribution is as fine as the sampling interval, which these runs
+  set to 0.25 s (`--sample-seconds`): a transition inside an interval counts for
+  the later state, so a residency figure is accurate to one interval per
+  transition.
 
 ## Incident run (before the fix)
 
@@ -194,19 +199,19 @@ argument list, so this is a property of the artifacts rather than of the text.
 | Quantity | Baseline | With the fix |
 |---|---|---|
 | Verdict | **`nothing_lost: false`** | **`nothing_lost: true`** |
-| Accepted events | 12,559 | 13,280 |
-| Persisted events | 11,459 | 13,280 |
-| Distinct events in QuestDB | 11,459 | 12,613 (+ 667 still durable in the spool) |
+| Accepted events | 12,297 | 13,260 |
+| Persisted events | 11,197 | 13,260 |
+| Distinct events in QuestDB | 11,197 | 12,793 (+ 467 still durable in the spool) |
 | Accepted events unaccounted for anywhere | **1,100** | **0** |
-| Accepted ids verified at the destination and missing | **1,100 of 12,559** | **0 of 12,613** |
+| Accepted ids verified at the destination and missing | **1,100 of 12,297** | **0 of 12,793** |
 | Duplicate rows in the destination | 0 | 0 |
-| Pauses ended by the writer (`storage_recoveries`) | **0** | **8** |
-| `storage_blocks` in the 10 s blocked window | 224 (one pause, counted per attempt: ~21/s) | 4 (8 pauses in the run) |
-| CPU in the blocked state, 10 s window | 1.06 s over 8.0 s = **13.2 % of one core** | 1.07 s over 7.0 s = **15.3 %** |
+| Pauses ended by the writer (`storage_recoveries`) | **0** | **13** |
+| `storage_blocks` in the blocked window | 192 (one pause, counted per attempt: ~21/s) | 3 (13 pauses in the run) |
+| CPU in the blocked state, in the window | 1.51 s over 9.30 s = **16.3 % of one core** | 1.55 s over 8.66 s = **17.8 %** |
 | A spool opened while the filesystem is full | `SpoolError: failed to initialize SQLite spool` (**unclassified**) | **`SpoolDiskFullError: database or disk is full`** |
-| Shutdown with a flush that could not proceed | 25.0 s, **92.7 %** of one core, `stopped_cleanly: false` | **1.9 s, 23.4 %**, `stopped_cleanly: true` |
-| Draining after the destination returned | 3.7 s | 2.2 s |
-| Disk cost | 2.01 B per payload byte, 4,600 B per row | 1.96 B per payload byte, 4,495 B per row |
+| Shutdown with a flush that could not proceed | 25.0 s, **93.3 %** of one core, `stopped_cleanly: false` | **1.1 s, 8.7 %**, `stopped_cleanly: true` |
+| Draining after the destination returned | 5.4 s | 6.5 s |
+| Disk cost | 2.01 B per payload byte, 4,611 B per row | 2.00 B per payload byte, 4,580 B per row |
 
 The startup row comes from the probe described below: the harness fills the tmpfs
 until the write itself fails (`OSError: ENOSPC`), then opens a fresh spool and
@@ -239,28 +244,28 @@ attributed to a state it did not spend time in.
 
 | Quantity | 61 events/s (peak) | 13 events/s (median) |
 |---|---|---|
-| Time in the blocked state inside the window | 10.0 s of 20 s | **0 s** |
-| CPU in the blocked state | 1.46 s = **14.6 % of one core** | — (the window contains no pause) |
-| New pauses in the window | 10 in the run | 1 in the run, none inside the window |
-| Time in delivery `retry_wait` in the run | 43.0 s at 26.5 % of one core | 58.4 s at 21.0 % of one core |
-| Accepted / delivered | 12,582 / 12,578 (+ 4 durable) | 11,435 / 11,435 |
+| Time in the blocked state inside the window | 14.3 s of 20 s | **0 s** |
+| CPU in the blocked state | 1.83 s over 14.3 s = **12.8 % of one core** | — (the window contains no pause) |
+| New pauses inside the window | 10 (11 in the whole run) | 0 (1 in the whole run, before the window) |
+| Time in delivery `retry_wait` in the run | 41.9 s at 27.0 % of one core | 60.2 s at 24.4 % of one core |
+| Accepted / delivered | 12,689 / 12,576 (+ 113 durable) | 11,458 / 11,458 |
 | Verdict | `nothing_lost: true` | `nothing_lost: true` |
-| Shutdown | 0.29 s, 23.9 % of one core | 0.005 s |
+| Shutdown | 0.95 s, 6.8 % of one core | 0.012 s |
 
 Two claims have to be separated here, because an earlier version of this document
 conflated them:
 
 - **A pause that is open costs CPU in proportion to the offered rate.** At the
-  production peak the blocked state cost 14.6 % of one core, and in the
-  same-conditions runs at 1,000 events/s offered the same state cost 13-15 %
-  (baseline 13.2 %, fixed 15.3 %): the cost tracks how often the writer is asked
-  to persist, not how full the disk is.
+  production peak the blocked state cost 12.8 % of one core, and in the
+  same-conditions runs at 1,000 events/s offered the same state cost 16.3 %
+  (baseline) and 17.8 % (fixed): the cost tracks how often the writer is asked to
+  persist, not how full the disk is.
 - **At the median rate the writer is not in a pause.** The 20 s window at
   13 events/s contained no blocked time at all: the reclamation keeps the disk
-  usable, and the run is spent in delivery `retry_wait` (21.0 % of one core),
-  waiting for the destination rather than for the disk. Reporting the window's
-  5.1 % as "the cost of a storage pause" would have been wrong, which is exactly
-  why the per-state breakdown exists.
+  usable, and the run is spent in delivery `retry_wait` (24.4 % of one core),
+  waiting for the destination rather than for the disk. Quoting a CPU figure from
+  that window as "the cost of a storage pause" would have been wrong, which is
+  exactly why the per-state breakdown exists.
 
 ## What this does not cover
 
