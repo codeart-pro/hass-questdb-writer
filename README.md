@@ -257,7 +257,7 @@ the WHERE clause goes first):
 ```sql
 SELECT entity_id, state
 FROM hass
-WHERE entity_id = 'sensor.carbon_monoxide'
+WHERE entity_id = 'sensor.example_temperature'
 LATEST ON last_updated PARTITION BY entity_id;
 ```
 
@@ -271,8 +271,12 @@ a fresh one.
 SELECT entity_id, count() AS events
 FROM hass
 WHERE last_updated > dateadd('h', -6, now())
-SAMPLE BY 1h;
+SAMPLE BY 1h
+ORDER BY events DESC LIMIT 20;
 ```
+
+One row per entity per hour — thousands of rows on a large instance, so the
+busiest few are kept in view.
 
 **Hourly average of a numeric entity** — states are stored as text, so
 numeric aggregates need a [cast](https://questdb.com/docs/reference/sql/cast/):
@@ -280,7 +284,7 @@ numeric aggregates need a [cast](https://questdb.com/docs/reference/sql/cast/):
 ```sql
 SELECT entity_id, avg(CAST(state AS DOUBLE)) AS avg_state
 FROM hass
-WHERE entity_id = 'sensor.carbon_monoxide'
+WHERE entity_id = 'sensor.example_temperature'
   AND last_updated > dateadd('h', -2, now())
 SAMPLE BY 1h;
 ```
