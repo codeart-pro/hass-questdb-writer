@@ -116,7 +116,7 @@ One run, every sample taken from its CSV:
 | Free space when the guard paused persistence | 15,106,048 B (14.4 MiB) against the 16 MiB reserve |
 | Pending at that moment | 11,279 rows / 25,817,631 B (24.6 MiB) |
 | On disk at that moment | 44.7 MiB database + 4.9 MiB WAL = 49.6 MiB |
-| Disk cost | 2.02 B per payload byte, 4,614 B per row | 2.00 B per payload byte, 4,579 B per row |
+| Disk cost | 2.02 B per payload byte, 4,617 B per row | 2.00 B per payload byte, 4,581 B per row |
 | Events the guard let through while blocked | 0; 8,923 were refused at the full ingress queue and counted |
 | Events moved to the dead letter | **0** |
 | Delivered after the destination returned | 11,279 rows in 3.4 s |
@@ -199,18 +199,18 @@ argument list, so this is a property of the artifacts rather than of the text.
 | Quantity | Baseline | With the fix |
 |---|---|---|
 | Verdict | **`nothing_lost: false`** | **`nothing_lost: true`** |
-| Accepted events | 12,212 | 13,293 |
-| Persisted events | 11,112 | 13,293 |
-| Distinct events in QuestDB | 11,112 | 12,626 (+ 667 still durable in the spool) |
+| Accepted events | 12,144 | 13,213 |
+| Persisted events | 11,044 | 13,213 |
+| Distinct events in QuestDB | 11,044 | 12,446 (+ 767 still durable in the spool) |
 | Accepted events unaccounted for anywhere | **1,100** | **0** |
-| Accepted ids verified at the destination and missing | **1,100 of 12,212** | **0 of 12,626** |
+| Accepted ids verified at the destination and missing | **1,100 of 12,144** | **0 of 12,446** |
 | Duplicate rows in the destination | 0 | 0 |
-| Pauses ended by the writer (`storage_recoveries`) | **0** | **9** |
-| `storage_blocks` in the blocked window | 220 (one pause, counted per attempt: ~21/s) | 4 (9 pauses in the run) |
-| CPU in the blocked state, in the window | 1.32 s over 8.59 s = **15.4 % of one core** | 1.33 s over 8.79 s = **15.1 %** |
+| Pauses ended by the writer (`storage_recoveries`) | **0** | **8** |
+| `storage_blocks` in the blocked window | 209 (one pause, counted per attempt: ~20/s) | 3 (8 pauses in the run) |
+| CPU in the blocked state, in the window | 1.37 s over 9.30 s = **14.8 % of one core** | 1.96 s over 9.14 s = **21.4 %** |
 | A spool opened while the filesystem is full | `SpoolError: failed to initialize SQLite spool` (**unclassified**) | **`SpoolDiskFullError: database or disk is full`** |
-| Shutdown with a flush that could not proceed | 25.0 s, **92.3 %** of one core, `stopped_cleanly: false` | **1.5 s, 9.4 %**, `stopped_cleanly: true` |
-| Draining after the destination returned | 2.4 s | 2.4 s |
+| Shutdown with a flush that could not proceed | 25.0 s, **90.1 %** of one core, `stopped_cleanly: false` | **1.4 s, 11.0 %**, `stopped_cleanly: true` |
+| Draining after the destination returned | 3.1 s | 3.0 s |
 | Disk cost | 2.01 B per payload byte, 4,611 B per row | 2.00 B per payload byte, 4,580 B per row |
 
 The startup row comes from the probe described below: the harness fills the tmpfs
@@ -244,25 +244,25 @@ attributed to a state it did not spend time in.
 
 | Quantity | 61 events/s (peak) | 13 events/s (median) |
 |---|---|---|
-| Time in the blocked state inside the window | 9.3 s of 20 s | **0 s** |
-| CPU in the blocked state | 1.22 s over 9.3 s = **13.1 % of one core** | — (the window contains no pause) |
+| Time in the blocked state inside the window | 11.8 s of 20 s | **0 s** |
+| CPU in the blocked state | 1.53 s over 11.8 s = **13.0 % of one core** | — (the window contains no pause) |
 | New pauses inside the window | 9 (10 in the whole run) | 0 (1 in the whole run, before the window) |
-| Time in delivery `retry_wait` in the run | 45.5 s at 26.5 % of one core | 60.1 s at 20.6 % of one core |
-| Accepted / delivered | 12,420 / 12,420 | 11,650 / 11,650 |
+| Time in delivery `retry_wait` in the run | 41.9 s at 33.0 % of one core | 59.2 s at 24.3 % of one core |
+| Accepted / delivered | 12,616 / 12,539 (+ 77 durable) | 11,548 / 11,548 |
 | Verdict | `nothing_lost: true` | `nothing_lost: true` |
-| Shutdown | 0.07 s, 22.7 % of one core | 0.012 s |
+| Shutdown | 0.60 s, 6.4 % of one core | 0.008 s |
 
 Two claims have to be separated here, because an earlier version of this document
 conflated them:
 
 - **A pause that is open costs CPU in proportion to the offered rate.** At the
-  production peak the blocked state cost 13.1 % of one core, and in the
-  same-conditions runs at 1,000 events/s offered the same state cost 15.4 %
-  (baseline) and 15.1 % (fixed): the cost tracks how often the writer is asked to
+  production peak the blocked state cost 13.0 % of one core, and in the
+  same-conditions runs at 1,000 events/s offered the same state cost 14.8 %
+  (baseline) and 21.4 % (fixed): the cost tracks how often the writer is asked to
   persist, not how full the disk is.
 - **At the median rate the writer is not in a pause.** The 20 s window at
   13 events/s contained no blocked time at all: the reclamation keeps the disk
-  usable, and the run is spent in delivery `retry_wait` (20.6 % of one core),
+  usable, and the run is spent in delivery `retry_wait` (24.3 % of one core),
   waiting for the destination rather than for the disk. Quoting a CPU figure from
   that window as "the cost of a storage pause" would have been wrong, which is
   exactly why the per-state breakdown exists.
