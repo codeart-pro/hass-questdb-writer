@@ -1330,6 +1330,12 @@ class WriterService:
 
         spool.mark_delivered(sequences)
         backoff.reset()
+        # A durable write on the delivery side proves the same storage is
+        # writable again, so it closes an open pause as well. Without this a
+        # pause opened by a delivery-side storage failure stays counted as open
+        # (and blocks the one rewrite per pause) until new ingress happens to be
+        # persisted, while delivery is already running normally.
+        self._resume_after_storage_block()
         with self._lock:
             self._delivered_events += len(sequences)
             self._uncertain_delivered_events += len(
