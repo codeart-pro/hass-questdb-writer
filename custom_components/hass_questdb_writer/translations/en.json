@@ -16,7 +16,7 @@
       },
       "reauth_confirm": {
         "title": "Update the QuestDB credentials",
-        "description": "QuestDB rejected the stored credentials. Enter the current ones - the host, port and table stay as configured (use Reconfigure to move the entry). Leave a field empty to keep the stored value.",
+        "description": "QuestDB rejected the stored credentials. Enter the current ones - the host, port and table stay as configured (use Reconfigure to move the entry). Both fields are stored as submitted, so leave both empty only when QuestDB runs without authentication.",
         "data": {
           "username": "Username (optional)",
           "password": "Password (optional)"
