@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import math
 from os import PathLike
 from pathlib import Path
+import shutil
 import sqlite3
 from types import TracebackType
 from typing import Final, Self
@@ -88,20 +89,54 @@ _READ_ONLY_SQLITE_CODES: Final = frozenset(
     if code is not None
 )
 
+# Codes SQLite answers with when the file cannot be created or extended at all -
+# what a filesystem with nothing left looks like before it gets as far as
+# SQLITE_FULL. Measured on a real tmpfs by benchmarks/spool_pressure.py.
+_OUT_OF_SPACE_SQLITE_CODES: Final = frozenset(
+    code
+    for code in (
+        getattr(sqlite3, "SQLITE_CANTOPEN", None),
+        getattr(sqlite3, "SQLITE_IOERR", None),
+    )
+    if code is not None
+)
 
-def classify_storage_error(exc: sqlite3.Error, message: str) -> SpoolError:
+# Below this, a page and its WAL frame do not fit, so a failed open is the
+# filesystem rather than the path.
+_OUT_OF_SPACE_FREE_BYTES: Final = 64 * 1024
+
+
+def classify_storage_error(
+    exc: sqlite3.Error, message: str, free_bytes: int | None = None
+) -> SpoolError:
     """Map a SQLite failure onto the spool error the worker reacts to.
 
-    Only the two conditions a retry can clear are classified; everything else
-    stays a plain :class:`SpoolError`, which the worker treats as fatal. Manually
-    constructed ``sqlite3.Error`` instances carry no ``sqlite_errorcode``, so
-    they fall through to the generic branch.
+    Only the conditions a retry can clear are classified; everything else stays a
+    plain :class:`SpoolError`, which the worker treats as fatal. Manually
+    constructed ``sqlite3.Error`` instances carry no ``sqlite_errorcode``, so they
+    fall through to the generic branch.
+
+    A filesystem with nothing left does not always fail the same way: when the
+    database file itself cannot be created or extended, SQLite answers
+    `SQLITE_CANTOPEN` or `SQLITE_IOERR` instead of `SQLITE_FULL` - measured on a
+    real tmpfs by `benchmarks/spool_pressure.py`. Those codes are only read as a
+    storage condition when the caller measured the free space and it is below what
+    a page write needs; otherwise the same code means a bad path or a permission
+    problem, and a plain error is the honest answer.
     """
     code = getattr(exc, "sqlite_errorcode", None)
     if code is not None and code == getattr(sqlite3, "SQLITE_FULL", None):
         return SpoolDiskFullError(f"{message}: database or disk is full")
     if code in _READ_ONLY_SQLITE_CODES:
         return SpoolReadOnlyError(f"{message}: database or filesystem is read-only")
+    if (
+        code in _OUT_OF_SPACE_SQLITE_CODES
+        and free_bytes is not None
+        and free_bytes < _OUT_OF_SPACE_FREE_BYTES
+    ):
+        return SpoolDiskFullError(
+            f"{message}: database or disk is full ({free_bytes} free bytes)"
+        )
     return SpoolError(message)
 
 
@@ -400,13 +435,26 @@ class SQLiteSpool:
             # Unlike a runtime failure it still fails the setup, and Home
             # Assistant retries the entry (ADR 0015).
             raise classify_storage_error(
-                exc, "failed to initialize SQLite spool"
+                exc,
+                "failed to initialize SQLite spool",
+                self._free_bytes(),
             ) from exc
 
     @property
     def path(self) -> Path:
         """The database file this spool owns."""
         return self._path
+
+    def _free_bytes(self) -> int | None:
+        """Free space where this spool lives, or None when it cannot be measured.
+
+        Used to tell "the filesystem has nothing left" apart from a path or
+        permission problem when SQLite reports the codes both of them share.
+        """
+        try:
+            return shutil.disk_usage(self._path.parent).free
+        except OSError:
+            return None
 
     @property
     def _db(self) -> sqlite3.Connection:

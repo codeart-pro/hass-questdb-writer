@@ -14,6 +14,7 @@ from unittest.mock import Mock, PropertyMock, patch
 
 from custom_components.hass_questdb_writer.spool import (
     BatchLimitTooSmallError,
+    classify_storage_error,
     DeadLetterFullError,
     EventTooLargeError,
     NewSpoolEvent,
@@ -773,6 +774,28 @@ class SQLiteSpoolDefensiveBranchTests(unittest.TestCase):
         ):
             with self.assertRaises(SpoolDiskFullError):
                 self.open_spool()
+
+    def test_out_of_space_codes_are_classified_only_with_no_free_space(self) -> None:
+        # A filesystem with nothing left does not answer SQLITE_FULL when the
+        # database file itself cannot be created: it answers CANTOPEN or IOERR -
+        # the same codes a bad path or a permission problem produces. The free
+        # space the caller measured is what tells them apart, which is why the
+        # classification takes it as an argument and why this behaviour was found
+        # on a real tmpfs (benchmarks/spool_pressure.py) rather than in a test.
+
+        class _CannotOpen(sqlite3.OperationalError):
+            sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+
+        error = _CannotOpen("unable to open database file")
+        self.assertIsInstance(
+            classify_storage_error(error, "open", 0), SpoolDiskFullError
+        )
+        self.assertIsInstance(
+            classify_storage_error(error, "open", 8 * 1024 * 1024), SpoolError
+        )
+        self.assertEqual(
+            type(classify_storage_error(error, "open")), SpoolError
+        )
 
     def test_reclaim_returns_space_to_the_filesystem(self) -> None:
         # The tests above measure the file; this measures the filesystem - what
