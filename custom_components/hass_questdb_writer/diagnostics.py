@@ -64,8 +64,10 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry.
 
-    Sensitive data (the HTTP Basic password) is redacted; everything else
-    is configuration and counters — safe to share in a bug report.
+    The HTTP Basic password is redacted. The rest is configuration and counters,
+    which still identifies the installation: host, port, table, the entity and
+    attribute patterns of the filter, and the integration's own spool path.
+    Review before posting it in public.
     """
     return {
         "entry_data": async_redact_data(dict(entry.data), [CONF_PASSWORD]),

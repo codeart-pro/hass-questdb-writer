@@ -100,9 +100,10 @@ rules:
   test-before-configure:
     status: done
     comment: >-
-      The user flow verifies the connection (and the schema) before the entry is
-      created; invalid credentials or an unreachable host are reported in the
-      form instead of being stored.
+      The user flow runs `select 1` over the same transport and error
+      classification the worker uses, so invalid credentials or an unreachable
+      host are reported in the form instead of being stored. The owned schema is
+      created and validated by the worker before the first delivery, not here.
   test-before-setup:
     status: done
     comment: >-
