@@ -18,6 +18,7 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryState,
     SOURCE_REAUTH,
+    SOURCE_RECONFIGURE,
     SOURCE_USER,
 )
 from homeassistant.core import HomeAssistant
@@ -239,6 +240,98 @@ class RuntimeQuestDbIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             list(entry.async_get_active_flows(self.hass, {SOURCE_REAUTH})), []
         )
+
+    async def test_reconfigure_moves_the_entry_and_the_destination(self) -> None:
+        """Reconfigure to another table: the entry moves and delivery follows."""
+        moved_table = f"{self.table}_moved"
+
+        async def drop_moved_table() -> None:
+            self.sql(f"drop table if exists {moved_table}")
+
+        self.sql(f"drop table if exists {moved_table}")
+        self.addAsyncCleanup(drop_moved_table)
+
+        form = await self.hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        result = await self.hass.config_entries.flow.async_configure(
+            form["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: self.table,
+                CONF_USE_TLS: False,
+            },
+        )
+        entry = result["result"]
+        self.addAsyncCleanup(self._unload_entry, entry)
+        await self.hass.async_block_till_done()
+        self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        original_unique_id = entry.unique_id
+
+        # One event reaches the original destination. The table receives every
+        # state change in the instance, so every count below is scoped to this
+        # entity.
+        entity = "input_boolean.questdb_move"
+        self.hass.states.async_set(entity, "on")
+        await self.hass.async_block_till_done()
+        self.assertTrue(await self._wait_for_rows(self.table, entity, "on"))
+
+        # Reconfigure to another table: the flow validates the new destination
+        # against the real server, stores it and reloads the entry.
+        flow = await self.hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+        )
+        self.assertEqual(flow["step_id"], "user")
+        finished = await self.hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            {
+                CONF_HOST: self.host,
+                CONF_PORT: self.port,
+                CONF_TABLE: moved_table,
+                CONF_USE_TLS: False,
+            },
+        )
+        self.assertEqual(finished["type"], "abort")
+        self.assertEqual(finished["reason"], "reconfigure_successful")
+        await self.hass.async_block_till_done()
+        self.assertEqual(entry.state, ConfigEntryState.LOADED)
+        self.assertEqual(entry.data[CONF_TABLE], moved_table)
+        # The identity follows the destination: a second entry aimed at the same
+        # server and table cannot be added next to a moved one.
+        self.assertNotEqual(entry.unique_id, original_unique_id)
+
+        # Delivery follows the entry: the new event lands in the new table, and
+        # the old one keeps exactly the row it had for this entity.
+        self.hass.states.async_set(entity, "off")
+        await self.hass.async_block_till_done()
+        self.assertTrue(await self._wait_for_rows(moved_table, entity, "off"))
+        rows = self.sql(
+            f"select state from {self.table} where entity_id = '{entity}'"
+        )
+        self.assertEqual(rows["dataset"], [["on"]])
+
+    async def _wait_for_rows(
+        self,
+        table: str,
+        entity_id: str,
+        state: str,
+        *,
+        timeout: float = 5,
+    ) -> bool:
+        """Wait until the table holds this entity's state change."""
+        statement = (
+            f"select count() from {table} where entity_id = '{entity_id}' "
+            f"and state = '{state}'"
+        )
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.sql_maybe(statement)
+            if (result or {}).get("dataset") and result["dataset"][0][0] >= 1:
+                return True
+            await asyncio.sleep(0.05)
+        return False
 
     async def test_config_flow_setup_reload_event_and_unload(self) -> None:
         form = await self.hass.config_entries.flow.async_init(
