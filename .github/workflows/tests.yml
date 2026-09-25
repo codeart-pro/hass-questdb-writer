@@ -31,11 +31,15 @@ jobs:
           - label: "2025.1.0 (declared minimum)"
             spec: "homeassistant==2025.1.0"
             python: "3.12"
-          # Current stable, so a Home Assistant release that breaks an API used here
-          # is noticed the same day.
+          # The current stable Home Assistant, so a release that breaks an API used
+          # here is noticed on the next push. `homeassistant` is deliberately left
+          # unpinned — but the Python version below must stay one that Home
+          # Assistant still supports: with a lagging Python, pip silently installs
+          # the newest *compatible* release instead of the current stable (Python
+          # 3.13 caps it at 2026.2.3, while the current stable needs >= 3.14.2).
           - label: "latest"
             spec: "homeassistant"
-            python: "3.13"
+            python: "3.14"
     steps:
       - name: Checkout
         uses: "actions/checkout@v4"
@@ -68,7 +72,7 @@ jobs:
             python: "3.12"
           - label: "latest"
             spec: "homeassistant"
-            python: "3.13"
+            python: "3.14"
     # The integration tests boot a real Home Assistant and write to a real QuestDB
     # (create/read/drop their own tables), so the job needs a live database.
     services:
