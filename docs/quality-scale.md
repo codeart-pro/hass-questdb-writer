@@ -22,6 +22,28 @@ closed the same day (`has-entity-name`, `test-before-setup`,
 (`parallel-updates`, `log-when-unavailable`, `reauthentication-flow`,
 `test-coverage`) were closed the same day as well.
 
+## Verified Home Assistant versions
+
+| Version | Where it is exercised |
+|---|---|
+| `2025.1.0` | the minimum `hacs.json` declares — both CI jobs (`homeassistant==2025.1.0`, Python 3.12) |
+| current stable (at the time of writing `2026.9.3`) | both CI jobs (`homeassistant`, unpinned, Python 3.14) |
+
+The "current stable" entry replaced a lane that had been pinned to Python 3.13:
+`pip install homeassistant` resolves to the newest release the *running Python*
+supports, so on Python 3.13 it silently installed 2026.2.3, while the current
+stable (2026.9.3) requires Python >= 3.14.2. The upper end of the declared range
+was therefore exercised months behind, not at the current stable.
+
+Evidence for the current state (checked 2026-09-25): the unit and integration
+jobs on Home Assistant 2026.9.3 pass in CI (run `36147080627`), the unit suite
+passes locally on Python 3.14.6 with HA 2026.9.3 (309 passed, 41 subtests), and
+the maintainer's production instance runs HA 2026.9.3 with integration `0.1.3`.
+
+The dev stack — where the ADRs' bench numbers were measured — still runs HA
+2026.7.2 (Python 3.14.6). Those records name that version because that is where
+the measurements were taken; they are not statements about the versions above.
+
 ## Current status (2026-09-12, rule-by-rule)
 
 | Tier | done | open (todo) | exempt | Tier claimable |

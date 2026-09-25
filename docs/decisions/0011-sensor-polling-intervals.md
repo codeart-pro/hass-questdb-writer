@@ -101,3 +101,8 @@ entity can only opt out of the platform poll with `should_poll = False`.
   the timer.
 - Container integration tests (`tests/integration`) still cover clean startup,
   reload and delivery with the sensors in place.
+- CI runs both against the declared minimum (`homeassistant==2025.1.0`, Python
+  3.12) and against the current stable release (`homeassistant`, Python 3.14):
+  the unit and integration jobs pass on Home Assistant 2026.9.3, which is where
+  the assertions on the 30 s / 5 min intervals above are exercised today
+  (2026-09-25, run `36147080627`).
