@@ -212,12 +212,14 @@ rules:
       README examples: the write watchdog automation and ready-to-use SQL
       queries (LATEST ON, SAMPLE BY with CAST, table_partitions volume).
   docs-known-limitations:
-    status: todo
+    status: done
     comment: >-
-      Limitations exist in the documentation but scattered (SQL-integration
-      sensors freeze during an outage, QuestDB Enterprise rejects non-zero TTL,
-      delivery is at-least-once plus server-side dedup). The rule asks for a
-      section that collects them.
+      README "## Known limitations" collects them: at-least-once with server-side
+      dedup (and the dedup key's uniqueness assumption), run-scoped health
+      counters, SQL-integration sensors freezing during an outage, table_size
+      going unavailable, the owned table that is never dropped, TTL requiring
+      QuestDB Open Source, the skipped/oversized/overflowed event counters, the
+      absent QuestDB add-on, and the QuestDB 10.0.1 verification range.
   docs-supported-devices:
     status: exempt
     comment: The integration talks to no devices; it writes to a QuestDB instance.

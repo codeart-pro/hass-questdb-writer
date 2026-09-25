@@ -22,7 +22,7 @@ while the connection is failing. Check the integration state:
    | `could not reach QuestDB` / connection refused | Wrong host/port or QuestDB down | Reconfigure; check the host reachability from the HA container |
    | `HTTP 401` / rejected credentials | Wrong username/password | Reconfigure |
    | `table ... does not match the owned schema` | Table was created outside the integration (Web Console, Grafana…) | Drop the table, or point the entry at a fresh table name |
-   | `spool is full` | SQLite spool hit its capacity while QuestDB was unreachable | Fix the connection; events stay in the dead letter |
+   | `spool is full` / `Spool persistence paused` | the spool reached a capacity limit, the filesystem ran out of space, or the database became read-only | fix the connection; accepted events stay queued and the writer resumes by itself, returning the pages of delivered rows to the filesystem when the spool is what filled the disk — this case never moves events into the dead letter |
 
 ## The table is not created
 

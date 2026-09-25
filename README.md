@@ -10,20 +10,37 @@ A `service`-type integration: it subscribes to the Home Assistant event bus
 and writes `state_changed` events to a QuestDB table over pure-Python
 ILP/HTTP. No native QuestDB client dependency, no C extensions.
 
+## Requirements
+
+- **Home Assistant 2025.1.0 or newer** — the minimum `hacs.json` declares. CI
+  runs the test suite against that version *and* against the current stable
+  release, so both ends of the range are exercised.
+- **A reachable QuestDB instance** (10.x is what the tests and the bench use).
+  The integration talks to its ILP/HTTP and REST endpoints on port `9000`;
+  PGWire `8812` is only needed if you also want the Home Assistant SQL
+  integration to read data back.
+  There is **no Home Assistant add-on for QuestDB** — the official and community
+  add-on repositories were checked. Run it as a container, package or binary.
+- **QuestDB Open Source** if you want the retention (TTL) option: QuestDB
+  Enterprise rejects a non-zero TTL and the integration then logs once and keeps
+  writing without it.
+- Nothing to install on the Home Assistant side: no extra package, no native
+  client, no YAML.
+
 ## Features
 
 - **Durable spool first**: events land in a local SQLite spool (WAL,
   `synchronous=FULL`) before anything touches the network, so an outage does not
-  lose accepted data while the spool has room. Delivery retries with
-  exponential backoff; the capacity bounds and what happens at the limit are in
+  lose accepted data while the spool has room; retries back off exponentially,
+  and the capacity bounds are in
   [ADR 0014](docs/decisions/0014-spool-pressure-policy.md).
-- **Idempotent replays**: delivery from the durable spool is at-least-once, and
+- **Idempotent replays**: delivery is at-least-once, and
   `DEDUP UPSERT KEYS(last_updated, entity_id)` collapses a repeated row into the
   same record, so retries, restarts and an uncertain acknowledgement do not
-  duplicate data. This is idempotent upsert under that key, not end-to-end
-  exactly-once: two *different* state changes carrying the same
-  `(last_updated, entity_id)` collapse into one row, and the key's uniqueness is
-  an assumption about Home Assistant semantics ([ADR 0005](docs/decisions/0005-questdb-record-format.md)).
+  duplicate data. Two *different* state changes carrying the same
+  `(last_updated, entity_id)` do collapse into one row — see
+  [Known limitations](#known-limitations)
+  ([ADR 0005](docs/decisions/0005-questdb-record-format.md)).
 - **Owned schema**: the integration creates and strictly validates its table
   (`TIMESTAMP(last_updated) PARTITION BY DAY WAL DEDUP UPSERT KEYS(...)`);
   delivery is gated until the schema check passes.
@@ -70,24 +87,23 @@ action; filtering and tuning options live in **Configure**.
 
 1. **Delete the config entry**: Settings → Devices & Services → **HASS QuestDB
    Writer** → ⋯ → **Delete**. Home Assistant unloads the entry first: the
-   state-change listener is removed, the writer stops (events already accepted are
-   persisted to the spool before it joins) and the table-size timer is cancelled.
-   The sensors and the device disappear from the UI.
+   state-change listener is removed, the writer persists what it already accepted
+   to the spool and stops, and the table-size timer is cancelled. The sensors and
+   the device disappear from the UI.
 2. **Remove the integration code**: in HACS → **HASS QuestDB Writer** → ⋯ →
    **Remove**, or delete `custom_components/hass_questdb_writer/` by hand, then
    restart Home Assistant.
-3. **Clean up what stays behind**:
-   - **QuestDB**: the integration creates and owns its table but never drops it,
-     so the history stays until you delete it yourself:
+3. **Clean up what stays behind** — deleting the entry removes neither of these:
+   - the **QuestDB table**: the integration creates and owns it but never drops
+     it, so the history stays until you delete it yourself:
 
      ```sql
      DROP TABLE hass;   -- the table name from your configuration
      ```
 
-   - **The local spool file**: `/config/.storage/hass_questdb_writer/<entry_id>.db`
-     is the SQLite spool, including events that were never delivered. Deleting the
-     config entry does not delete it — remove the file by hand once you are sure
-     you do not need its contents.
+   - the **local spool file**: `/config/.storage/hass_questdb_writer/<entry_id>.db`
+     is the SQLite spool, including events that were never delivered. Remove the
+     file by hand once you are sure you do not need its contents.
 
 ## Options
 
@@ -239,24 +255,24 @@ mode: single
 While QuestDB is unreachable the writer keeps buffering events in the
 SQLite spool (at-least-once, bounded):
 
-- **Capacity**: 100,000 rows / 64 MiB spool + 1,000 / 16 MiB
+- **Capacity**: 100,000 rows / 64 MiB spool plus 1,000 / 16 MiB
   dead-letter, tunable in **Configure → Show advanced settings**
   (see [Options](#options) above); at a typical 100–500 events/min
   that covers roughly 3–17 h of downtime
-- **Full spool or full disk**: persistence pauses instead of the writer dying -
-  the state becomes `blocked` and diagnostics name the reason (`spool_full`,
+- **Full spool or full disk**: persistence pauses instead of the writer dying.
+  The state becomes `blocked` and diagnostics name the reason (`spool_full`,
   `disk_space`, `disk_full` or `readonly`). Accepted events stay queued, the
   writer keeps retrying and resumes by itself once QuestDB is back or storage
-  recovers - including when the spool is what filled the disk: it returns the
+  recovers — including when the spool is what filled the disk: it returns the
   pages of already delivered rows and truncates its WAL while the reserve is
   consumed ([ADR 0015](docs/decisions/0015-spool-space-reclamation.md)). Only
-  events that no longer fit the in-memory queue are dropped, counted
-  in `overflowed_events`. The writer also keeps a free-space reserve
-  (`Min free disk space` options below) and pauses instead of writing into it, so
-  the recorder, logs and backups are not the ones that lose the last of the disk
-  to the spool. The reserve is a pause threshold checked before every durable
-  write, not an untouched buffer: one write may cross it by up to one persist
-  batch before the next check stops the writer
+  events that no longer fit the in-memory queue are dropped, counted in
+  `overflowed_events`
+- **Free-space reserve**: the writer keeps the `Min free disk space` options
+  untouched, so the recorder, logs and backups are not the ones that lose the
+  last of the disk to the spool. The reserve is a pause threshold checked before
+  every durable write, not an untouched buffer: one write may cross it by up to
+  one persist batch before the next check stops the writer
   ([ADR 0014](docs/decisions/0014-spool-pressure-policy.md))
 - **Logs**: rate-limited retry warnings (1st, 2nd, 4th… attempt), no spam
 
@@ -355,87 +371,77 @@ above).
 **Alternatives**: [QSS](https://github.com/CM000n/qss) is another
 option for writing HA states to QuestDB.
 
+## Known limitations
+
+- **Delivery is at-least-once, not exactly-once.** Server-side dedup on
+  `(last_updated, entity_id)` collapses a re-delivered row into the same record,
+  but two *different* state changes carrying the same `(last_updated, entity_id)`
+  also collapse into one row: the key's uniqueness is an assumption about Home
+  Assistant semantics, not something the integration can check
+  ([ADR 0005](docs/decisions/0005-questdb-record-format.md)).
+- **The health counters are run-scoped.** `events_delivered` counts the current
+  worker run and reads 0 again after a Home Assistant restart or an integration
+  reload; `seconds_since_last_delivery` is `unknown` until the first delivery of
+  that run. `pending_rows` (read from the spool) and `table_size` (queried from
+  QuestDB) do survive. A watchdog watching only `seconds_since_last_delivery`
+  cannot see an outage that began before a restart — watch `pending_rows` too
+  ([Health sensors](#health-sensors)).
+- **Reading through the Home Assistant SQL integration freezes.** Those sensors
+  hold their last value while QuestDB is unreachable, which makes them useless as
+  a write watchdog. The integration's own health sensors keep reporting, because
+  they never touch QuestDB.
+- **`table_size` goes `unavailable` during an outage**: it is queried from
+  QuestDB every 5 minutes. Use it to plan retention, not to raise alarms.
+- **The integration owns its table.** A table created outside the integration
+  (Web Console, Grafana, another writer) fails the schema check and no delivery
+  happens until it is fixed — drop it or point the entry at a fresh name. The
+  integration never drops the table, not even when the config entry is deleted.
+- **Retention needs QuestDB Open Source.** QuestDB Enterprise rejects a non-zero
+  TTL (it uses storage policies instead): there the integration logs once and
+  keeps writing without TTL. Where it is active, TTL removes whole day
+  partitions, asynchronously.
+- **Events can be skipped, and the counters that tell you are only in the
+  diagnostics download.** `unknown` states are never written; events larger than
+  **Max serialized event bytes** are skipped (`oversized_events`); events that no
+  longer fit the in-memory ingress queue are dropped (`overflowed_events`).
+- **No QuestDB add-on for Home Assistant** — the official and community add-on
+  repositories were checked; QuestDB runs separately and is not managed by the
+  integration.
+- **Verified against QuestDB 10.0.1** (the bench and the CI service image).
+  Other QuestDB releases have not been exercised.
+- **The development stack, dashboards and benchmarks are kept in a private
+  repository.** Of the measurements, only what is published under
+  [`docs/benchmarks/`](docs/benchmarks/) and the ADRs is reproducible from here.
+
 ## Troubleshooting
 
-Symptoms, causes, and fixes. QuestDB itself:
-[quick start](https://questdb.com/docs/getting-started/quick-start/)
-and [Web Console](https://questdb.com/docs/getting-started/web-console/overview/).
+The full symptom → cause → fix guide is
+**[docs/troubleshooting.md](docs/troubleshooting.md)**. The three checks that
+resolve most cases:
 
-### Nothing is written to QuestDB
+1. **Integration state** — Devices & Services → **HASS QuestDB Writer** → ⋯ →
+   **System options**. A **Repair issue** ("QuestDB rejected the credentials")
+   means the HTTP Basic credentials are wrong: fix them in **Reconfigure**.
+2. **Health sensors** — `state` says what the worker is doing and
+   `last_delivery_error` names the last failure; the watchdog automation is in
+   [Health sensors](#health-sensors) above.
+3. **Logs** — Settings → System → Logs, filtered by `hass_questdb_writer`. A
+   blocked worker logs the last delivery error, rate-limited, so only a few
+   lines per outage.
 
-The writer pauses delivery while the schema is being created/validated and
-while the connection is failing. Check the integration state:
-
-1. **Devices & Services → HASS QuestDB Writer → ⋯ → System options**
-   — if a **Repair issue** is shown ("QuestDB rejected the credentials"):
-   the HTTP Basic credentials are wrong. Open **Reconfigure** and update
-   the username/password.
-2. Otherwise open **Settings → System → Logs** and filter by
-   `hass_questdb_writer`. A blocked worker logs the last delivery error
-   (rate-limited, so only a few lines). Typical messages:
-
-   | Message | Meaning | Fix |
-   |---|---|---|
-   | `could not reach QuestDB` / connection refused | Wrong host/port or QuestDB down | Reconfigure; check the host reachability from the HA container |
-   | `HTTP 401` / rejected credentials | Wrong username/password | Reconfigure |
-   | `table ... does not match the owned schema` | Table was created outside the integration (Web Console, Grafana…) | Drop the table, or point the entry at a fresh table name |
-   | `spool is full` / `Spool persistence paused` | the spool reached a capacity limit, the filesystem ran out of space, or the database became read-only | fix the connection; accepted events stay queued and the writer resumes by itself, returning the pages of delivered rows to the filesystem when the spool is what filled the disk — this case never moves events into the dead letter |
-
-### The table is not created
-
-The table is created by the worker on the first delivery attempt, and only
-when the schema check passes. Nothing is created at setup time. If the
-table is missing after the first event:
-
-- verify the entry host/port from **inside** the HA container — with a
-  podman/docker compose stack, use the **container-network** port (e.g.
-  `questdb:9000`), not the host-published port;
-- check the logs for a schema error (`SHOW COLUMNS` failure).
-
-### Duplicate-looking rows
-
-The table is `DEDUP UPSERT KEYS(last_updated, entity_id)`: re-delivered
-events replace the existing row instead of inserting a second one. A
-state that genuinely changed twice at different `last_updated` values
-produces two rows — that is history, not a duplicate.
-
-### Data disappears / retention
-
-The **Data retention** advanced option ([QuestDB TTL](https://questdb.com/docs/concepts/ttl/))
-makes QuestDB drop whole day
-partitions older than the window. The TTL applies asynchronously; check
-it with:
-
-```sql
-SELECT table_name, ttlValue, ttlUnit FROM tables() WHERE table_name = '…';
-```
-
-`SHOW CREATE TABLE` does not render the TTL clause on deduplicated WAL
-tables even when it is active.
-
-### Restarting Home Assistant
-
-Delivery is at-least-once: events buffered in the SQLite spool survive a
-HA restart and are re-delivered; the dedup keys make the re-delivery
-idempotent.
-
-### Outage behaviour (verified)
-
-Stopping QuestDB for minutes and starting it again:
-
-- the worker retries with exponential backoff and logs a rate-limited
-  warning (1st, 2nd, 4th, … attempt) telling the user that events stay
-  in the SQLite spool;
-- the spool keeps growing while QuestDB is down;
-- on recovery every buffered event is delivered: the row count matches
-  exactly and no duplicate `(last_updated, entity_id)` groups appear.
+| Symptom | Where it is worked through |
+|---|---|
+| Nothing reaches QuestDB | credentials, host/port as seen from the HA container, schema check errors |
+| The table is missing | it is created on the first delivery attempt; check the container-network port |
+| Rows look duplicated | dedup keeps `(last_updated, entity_id)` unique |
+| Old data disappears | the **Data retention** (TTL) option drops whole day partitions |
+| Alarming values right after a restart | `events_delivered` = 0 and `seconds_since_last_delivery` = `unknown` are expected |
 
 ### Getting help
 
 Include in any bug report: HA version, QuestDB version, the integration
-diagnostics (downloadable from Devices & Services), the log excerpt
-filtered by `hass_questdb_writer`, and the table DDL
-(`SHOW CREATE TABLE …`).
+diagnostics (downloadable from Devices & Services), the log excerpt filtered by
+`hass_questdb_writer`, and the table DDL (`SHOW CREATE TABLE …`).
 
 ## Data model
 
