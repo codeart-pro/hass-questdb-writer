@@ -167,6 +167,18 @@ never touch QuestDB, so they keep reporting (and raising alarms) while
 the server is unreachable. They are polled **every 30 seconds**;
 `homeassistant.update_entity` forces an immediate refresh on demand.
 
+Four of the five values are **run-scoped**: `state`,
+`seconds_since_last_delivery`, `events_delivered` and `last_delivery_error`
+come from the worker process, so they start over with it. After a Home
+Assistant restart (including the one a HACS update requires) or an
+integration reload, `events_delivered` is 0 again and
+`seconds_since_last_delivery` reads `unknown` until the first successful
+delivery of that run. That is a restart marker, not data loss: undelivered
+events wait in the SQLite spool. The two values that do survive a restart are
+`pending_rows` (read from that spool) and `table_size` (queried from QuestDB).
+For a total that never resets, use the long-term statistics of
+`events_delivered` — its `sum` keeps accumulating across restarts.
+
 Entity labels read as fields of the device, so Home Assistant shows them as
 **HASS QuestDB Writer State**, **HASS QuestDB Writer Table size**, and so on. The
 entity IDs below are what a **fresh install** gets; entities registered by an
@@ -175,31 +187,50 @@ earlier version keep the ID they already have (only their friendly name changes)
 | Entity | Meaning |
 |---|---|
 | `state` | worker state: `new`/`starting`/`running`/`retry_wait`/`blocked`/`stopping`/`stopped`/`failed` |
-| `seconds_since_last_delivery` | age of the last successful delivery (s) — **grows during an outage** |
-| `pending_rows` | undelivered rows buffered in SQLite |
-| `events_delivered` | total events delivered (total_increasing) |
+| `seconds_since_last_delivery` | age of the last successful delivery (s) — **grows during an outage**; `unknown` until the first delivery of the current run |
+| `pending_rows` | undelivered rows buffered in SQLite — survives a restart |
+| `events_delivered` | events delivered **since this worker started** (total_increasing; in-memory, so it is 0 again after every restart or reload — for a lifetime total use its statistics) |
 | `last_delivery_error` | text of the last delivery error, `none` when clean |
 | `table_size` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB every 5 minutes** by its own timer (not the 30 s health poll), goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
 
 Because the SQL integration's sensors freeze on their last value while
 QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`
-(the health sensor keeps counting up) — not on SQL-derived values:
+— not on SQL-derived values. That trigger alone has one blind spot: the sensor
+is `unknown` until the first successful delivery of the current run, and a
+`numeric_state` trigger never fires on `unknown`. An outage that began before a
+Home Assistant restart and continues after it is therefore invisible to it.
+The spool-backed `pending_rows` covers that window — its value is reconciled
+from the rows when the spool is opened, so it is correct even before the first
+delivery — so watch both:
 
 ```yaml
 alias: QuestDB write watchdog
 triggers:
+  # Deliveries stopped during the current run.
   - trigger: numeric_state
     entity_id: sensor.hass_questdb_writer_seconds_since_last_delivery
     above: 300
+  # Deliveries never started after a restart. Tune the row threshold to your
+  # event rate: at the 100-500 events/min assumed in "Outage behavior" below,
+  # 1000 rows is roughly 2-10 minutes of backlog.
+  - trigger: numeric_state
+    entity_id: sensor.hass_questdb_writer_pending_rows
+    above: 1000
+    for: "00:05:00"
 conditions:
-  - condition: numeric_state
-    entity_id: sensor.hass_questdb_writer_seconds_since_last_delivery
-    above: 300
+  - condition: or
+    conditions:
+      - condition: numeric_state
+        entity_id: sensor.hass_questdb_writer_seconds_since_last_delivery
+        above: 300
+      - condition: numeric_state
+        entity_id: sensor.hass_questdb_writer_pending_rows
+        above: 1000
 actions:
   - action: notify.mobile_app_phone
     data:
       title: "⚠️ QuestDB writes have stopped"
-      message: "No event was delivered for over 5 minutes. Check the integration, QuestDB and the network."
+      message: "Events have not been delivered for over 5 minutes. Check the integration, QuestDB and the network."
 mode: single
 ```
 

@@ -62,6 +62,19 @@ Delivery is at-least-once: events buffered in the SQLite spool survive a
 HA restart and are re-delivered; the dedup keys make the re-delivery
 idempotent.
 
+Two health values look alarming right after a restart (including the one a
+HACS update requires) and are not:
+
+- `events_delivered` is back to **0** — it counts the current worker run;
+- `seconds_since_last_delivery` reads **`unknown`** — there has been no
+  successful delivery yet in this run.
+
+Neither of them means data was lost. `pending_rows` (read from the spool) and
+`table_size` (queried from QuestDB) survive the restart, and the events that
+were waiting are delivered from the spool. The one case worth acting on is
+`events_delivered` staying at 0 while `pending_rows` keeps growing: then the
+writer is genuinely stuck — check `last_delivery_error` and the worker `state`.
+
 ## Outage behaviour (verified)
 
 Stopping QuestDB for minutes and starting it again:
