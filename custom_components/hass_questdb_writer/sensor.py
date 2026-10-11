@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 import logging
 import time
 from typing import Any
@@ -61,6 +62,14 @@ SCAN_INTERVAL = timedelta(seconds=30)
 # over partitions that only grows, and 5 minutes bounds it to 288 queries/day.
 TABLE_SIZE_SCAN_INTERVAL = timedelta(minutes=5)
 TABLE_SIZE_TIMER_NAME = "hass_questdb_writer table size"
+
+# QuestDB closes a connection that has been idle for
+# `http.net.idle.connection.timeout` (5 minutes by default), and an idle-timeout
+# close is silent: the client discovers it only when the next request is already
+# on the wire. The refresh interval above sits exactly on that boundary, so
+# without a repetition a single reaped connection costs a whole interval without
+# a value (ADR-0016). One repetition on a fresh connection costs milliseconds.
+TABLE_SIZE_QUERY_RETRIES = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,7 +182,10 @@ class QuestDbTableSizeSensor(QuestDbWriterEntity):
 
     Unlike the memory-backed health sensors this one talks to QuestDB:
     while the server is unreachable the sensor goes unavailable (it is
-    a growth monitor, not a watchdog source).
+    a growth monitor, not a watchdog source). A query that fails while the
+    connection is the problem is repeated once on a fresh connection
+    (`TABLE_SIZE_QUERY_RETRIES`, ADR-0016), so a connection QuestDB closed
+    while it was idle costs milliseconds instead of a whole interval.
 
     It also leaves the platform poll and refreshes itself on
     `TABLE_SIZE_SCAN_INTERVAL` (ADR-0011): the platform interval exists for the
@@ -237,8 +249,11 @@ class QuestDbTableSizeSensor(QuestDbWriterEntity):
             )
         try:
             result = await self.hass.async_add_executor_job(
-                self._transport.exec_query,
-                f"SELECT sum(diskSize) FROM table_partitions('{self._table}')",
+                partial(
+                    self._transport.exec_query,
+                    f"SELECT sum(diskSize) FROM table_partitions('{self._table}')",
+                    retries=TABLE_SIZE_QUERY_RETRIES,
+                )
             )
             rows = result.get("dataset") or []
             size_bytes = int(rows[0][0]) if rows and rows[0][0] is not None else None

@@ -209,6 +209,15 @@ earlier version keep the ID they already have (only their friendly name changes)
 | `last_delivery_error` | text of the last delivery error, `none` when clean |
 | `table_size` | on-disk size of the entry's table (MB, decimal) — **queried from QuestDB every 5 minutes** by its own timer (not the 30 s health poll), goes `unavailable` during an outage; use it to plan retention, not for watchdog triggers |
 
+`table_size` is the one health sensor that talks to QuestDB (one query per
+5 minutes). The sensor repeats a failed query once on a fresh connection
+([ADR 0016](docs/decisions/0016-table-size-query-repetition.md)): QuestDB closes
+a connection that sat idle for `http.net.idle.connection.timeout` — 5 minutes by
+default, the same value as the refresh interval — and a client only discovers
+that when it sends the next request. Without the repetition such a reaped
+connection cost a whole interval without a value. Only a server that does not
+answer at all leaves the entity `unavailable`, until its next refresh.
+
 Because the SQL integration's sensors freeze on their last value while
 QuestDB is down, a write watchdog must trigger on `seconds_since_last_delivery`
 — not on SQL-derived values. That trigger alone has one blind spot: the sensor
@@ -391,7 +400,11 @@ option for writing HA states to QuestDB.
   a write watchdog. The integration's own health sensors keep reporting, because
   they never touch QuestDB.
 - **`table_size` goes `unavailable` during an outage**: it is queried from
-  QuestDB every 5 minutes. Use it to plan retention, not to raise alarms.
+  QuestDB every 5 minutes, and only a failing query is repeated once on a fresh
+  connection ([ADR 0016](docs/decisions/0016-table-size-query-repetition.md)) —
+  a connection reaped while idle holds the value, a server that stays
+  unreachable keeps the entity `unavailable` until its next refresh. Use it to
+  plan retention, not to raise alarms.
 - **The integration owns its table.** A table created outside the integration
   (Web Console, Grafana, another writer) fails the schema check and no delivery
   happens until it is fixed — drop it or point the entry at a fresh name. The

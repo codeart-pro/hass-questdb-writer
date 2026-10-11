@@ -237,6 +237,32 @@ class QuestDbHealthSensorTests(unittest.IsolatedAsyncioTestCase):
             await sensor.async_update()
         self.assertFalse(sensor.available)
 
+    async def test_table_size_asks_for_one_repetition(self) -> None:
+        # The repetition lives in the transport, because that is where the
+        # connection is and where a reaped connection can be replaced
+        # (ADR-0016); this pins the wiring and tests/unit/test_transport.py
+        # pins the behaviour itself.
+        sensor = self.table_size_sensor()
+        sensor.hass = Mock(
+            async_add_executor_job=AsyncMock(
+                side_effect=lambda fn, *a: fn(*a)
+            )
+        )
+        with patch(
+            "custom_components.hass_questdb_writer.runtime.IlpHttpTransport"
+        ) as transport_cls:
+            transport_cls.return_value.exec_query = Mock(
+                return_value={"dataset": [[1_000_000]]}
+            )
+            self.assertEqual(sensor_module.TABLE_SIZE_QUERY_RETRIES, 1)
+            await sensor.async_update()
+            transport_cls.return_value.exec_query.assert_called_once_with(
+                "SELECT sum(diskSize) FROM table_partitions('hass')",
+                retries=1,
+            )
+        self.assertTrue(sensor.available)
+        self.assertEqual(sensor.native_value, 1.0)
+
 
 class TableSizeAvailabilityLoggingTests(unittest.IsolatedAsyncioTestCase):
     """Silver rule log-when-unavailable: one line per availability transition."""

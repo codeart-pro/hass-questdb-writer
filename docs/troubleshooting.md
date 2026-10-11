@@ -75,6 +75,29 @@ were waiting are delivered from the spool. The one case worth acting on is
 `events_delivered` staying at 0 while `pending_rows` keeps growing: then the
 writer is genuinely stuck — check `last_delivery_error` and the worker `state`.
 
+## The table size sensor is unavailable
+
+`HASS QuestDB Writer Table size` is the only health sensor that asks QuestDB. It
+sends one query every 5 minutes. While the server does not answer, the entity
+reads `unavailable`. A repeated transition between a value and `unavailable` is
+normal, and the log names the cause:
+
+```
+WARNING (MainThread) [custom_components.hass_questdb_writer.sensor]
+QuestDB table size query for hass failed: QuestDB exec request failed:
+RemoteDisconnected; the sensor reports unavailable and retries in 0:05:00
+```
+
+| Log detail | Cause | What to expect |
+|---|---|---|
+| `RemoteDisconnected`, and the writer is healthy | QuestDB closed the connection while it was idle. The idle limit is `http.net.idle.connection.timeout` (5 minutes by default), the same value as the refresh interval | the sensor repeats the query once on a new connection, and the value stays. A second entry in the log means the repetition failed too |
+| `RemoteDisconnected` after you restarted QuestDB, or `gaierror` in the worker log | The server went away. An mDNS name such as `questdb.local` goes away with it | the writer recovers in seconds from its spool. The sensor reports a value again at its next refresh, up to 5 minutes later |
+| `HTTP 400` with `table does not exist` after the setup or a Home Assistant restart | The worker creates the table on the first delivery, and the sensor measures before that delivery | the next refresh reports a value |
+
+If the entry uses an mDNS host name, expect `gaierror` in the worker log while
+the QuestDB host is away. Reconfigure the entry with a static address to remove
+that class of failure.
+
 ## Outage behaviour (verified)
 
 Stopping QuestDB for minutes and starting it again:

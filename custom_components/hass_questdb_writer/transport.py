@@ -177,7 +177,7 @@ class IlpHttpTransport:
             status_code=response.status,
         )
 
-    def exec_query(self, query: str) -> dict:
+    def exec_query(self, query: str, *, retries: int = 0) -> dict:
         """Run one QuestDB /exec statement and return the JSON document.
 
         Network failures, retryable HTTP statuses, and server errors raise
@@ -185,10 +185,33 @@ class IlpHttpTransport:
         the server detail; authentication failures raise AuthenticationIlpError.
         Exec queries are never delivery-uncertain: DDL statements are
         idempotent and validation queries are read-only.
+
+        `retries` repeats a RETRYABLE failure, and every repetition runs on a
+        fresh connection. A caller that queries far apart (the table-size
+        sensor, one query per 5 minutes) otherwise pays a whole polling interval
+        for a connection the server closed while it was idle: the client only
+        discovers the closed connection when the next request is already on the
+        wire.
         """
         if not isinstance(query, str) or not query:
             raise ValueError("query must be a non-empty string")
+        if retries < 0:
+            raise ValueError("retries must not be negative")
         path = f"{EXEC_PATH}{urllib.parse.quote(query, safe='')}"
+        attempt = 0
+        while True:
+            try:
+                return self._exec_query_on_current_connection(path)
+            except RetryableIlpError:
+                if attempt >= retries:
+                    raise
+                attempt += 1
+                # The failure may BE the connection (a server that closed it or
+                # went away), so a repetition must never reuse it.
+                self.close()
+
+    def _exec_query_on_current_connection(self, path: str) -> dict:
+        """Send one prepared /exec request and parse its JSON document."""
         connection = self._get_connection()
         try:
             connection.request(

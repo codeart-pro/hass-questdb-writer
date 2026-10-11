@@ -205,6 +205,66 @@ class IlpHttpTransportTests(unittest.TestCase):
                     transport.exec_query(query)  # type: ignore[arg-type]
         self.assertEqual(transport.connection_count, 0)
 
+    def test_exec_query_rejects_negative_retries_before_connecting(self) -> None:
+        transport = self.transport(FakeConnection([]))
+        with self.assertRaises(ValueError):
+            transport.exec_query("SELECT 1", retries=-1)
+        self.assertEqual(transport.connection_count, 0)
+
+    def test_exec_query_repeats_a_reaped_connection_on_a_fresh_one(self) -> None:
+        # QuestDB closes a connection that sat idle, and the client only finds
+        # out when the next request is already on the wire. The repetition must
+        # therefore run on a new connection, not on the dead one.
+        reaped = FakeConnection(
+            [http.client.RemoteDisconnected("Remote end closed connection")]
+        )
+        fresh = FakeConnection([FakeResponse(200, b'{"dataset": [[42]], "count": 1}')])
+        transport = self.transport(reaped, fresh)
+        document = transport.exec_query("SELECT sum(diskSize)", retries=1)
+        self.assertEqual(document["dataset"], [[42]])
+        self.assertTrue(reaped.closed)
+        self.assertEqual(transport.connection_count, 2)
+        self.assertEqual(len(fresh.requests), 1)
+
+    def test_exec_query_repeats_a_retryable_server_error(self) -> None:
+        failed = FakeConnection([FakeResponse(503, b"not ready")])
+        recovered = FakeConnection([FakeResponse(200, b'{"dataset": [[7]]}')])
+        transport = self.transport(failed, recovered)
+        document = transport.exec_query("SELECT 1", retries=1)
+        self.assertEqual(document["dataset"], [[7]])
+        self.assertTrue(failed.closed)
+        self.assertEqual(transport.connection_count, 2)
+
+    def test_exec_query_without_retries_raises_on_the_first_failure(self) -> None:
+        # The default keeps every other caller on a single attempt.
+        transport = self.transport(
+            FakeConnection([http.client.RemoteDisconnected("closed")])
+        )
+        with self.assertRaises(RetryableIlpError):
+            transport.exec_query("SELECT 1")
+        self.assertEqual(transport.connection_count, 1)
+
+    def test_exec_query_does_not_repeat_a_rejected_statement(self) -> None:
+        # A rejected statement is not a connection problem: repeating it would
+        # only repeat the rejection.
+        connection = FakeConnection(
+            [FakeResponse(400, b'{"error":"table does not exist [table=hass]"}')]
+        )
+        transport = self.transport(connection)
+        with self.assertRaises(PermanentIlpError):
+            transport.exec_query("SELECT 1", retries=1)
+        self.assertEqual(transport.connection_count, 1)
+
+    def test_exec_query_repetitions_are_bounded(self) -> None:
+        # A server that is away must not hold the caller: one repetition means
+        # two attempts, and the last error reaches the caller.
+        first = FakeConnection([http.client.RemoteDisconnected("closed")])
+        second = FakeConnection([http.client.RemoteDisconnected("closed")])
+        transport = self.transport(first, second)
+        with self.assertRaises(RetryableIlpError):
+            transport.exec_query("SELECT 1", retries=1)
+        self.assertEqual(transport.connection_count, 2)
+
     def test_constructor_rejects_empty_host(self) -> None:
         with self.assertRaises(ValueError):
             IlpHttpTransport("", 9000, use_tls=False, timeout_seconds=5)

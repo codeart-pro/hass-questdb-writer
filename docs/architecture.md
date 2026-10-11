@@ -434,7 +434,10 @@ opts out of the platform poll (`should_poll = False`) and owns a 5-minute
 `async_track_time_interval` timer, cancelled on removal. Both intervals are
 explicit because Home Assistant otherwise inherits the sensor-domain default and
 because the quality-scale rule *appropriate-polling* requires a stated interval
-(ADR-0011).
+(ADR-0011). Its query is the one read path that can fail on the connection
+alone: `http.net.idle.connection.timeout` (5 minutes by default) closes a
+connection that sat idle as long as the refresh interval does, so the sensor
+repeats a failed query once on a fresh connection (ADR-0016).
 
 ## Development environment
 
