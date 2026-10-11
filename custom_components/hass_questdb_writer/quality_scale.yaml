@@ -25,7 +25,9 @@ rules:
     comment: >-
       sensor.py declares SCAN_INTERVAL (30 s) for the five in-memory health
       sensors, and the table-size sensor leaves platform polling for its own
-      5-minute timer (TABLE_SIZE_SCAN_INTERVAL). See ADR-0011.
+      5-minute timer (TABLE_SIZE_SCAN_INTERVAL). See ADR-0011. Its interval equals
+      QuestDB's idle-connection timeout, so the sensor repeats a failed query once
+      on a fresh connection (ADR-0016).
   brands:
     status: done
     comment: >-
@@ -143,6 +145,9 @@ rules:
       The table-size sensor reports unavailable while QuestDB cannot be queried.
       The health sensors deliberately never go unavailable: they read the
       in-memory snapshot and are the documented watchdog source for an outage.
+      A connection that QuestDB closed while it was idle no longer counts as
+      "cannot be queried": the sensor repeats that query once on a fresh
+      connection (ADR-0016).
   integration-owner:
     status: done
     comment: >-
@@ -155,6 +160,8 @@ rules:
       The table-size sensor logs one warning with the transport error when it goes
       unavailable and one info line when QuestDB answers again, on the transitions
       only, so a five-minute refresh interval cannot spam the log during an outage.
+      The repetition of ADR-0016 adds no line of its own: it logs only when both
+      attempts fail.
       Unit tests cover the single warning, the single recovery line and silence
       while healthy. Closed issue #8.
   parallel-updates:
@@ -233,7 +240,7 @@ rules:
     comment: >-
       README "## Troubleshooting" plus docs/troubleshooting.md (symptoms → causes
       → fixes for auth, unreachable host, schema mismatch, spool/dead-letter
-      limits and TTL).
+      limits, TTL and a table-size sensor that goes unavailable and comes back).
   docs-use-cases:
     status: done
     comment: >-

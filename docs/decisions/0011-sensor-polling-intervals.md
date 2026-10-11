@@ -2,6 +2,10 @@
 
 Status: accepted.
 
+Partially superseded by [ADR 0016](0016-table-size-query-repetition.md): a failed
+table-size query is now repeated once on a fresh connection, so "unavailable
+until the next tick" below holds only while the server does not answer at all.
+
 Date: 2026-09-12
 
 ## Context

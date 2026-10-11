@@ -89,7 +89,11 @@ transparency).
   sensor refreshes on its own 5-minute timer. Verified in a live HA 2026.7.2
   instance: health sensors update every 30.0 s (recorder timestamps) and the
   table-size entity at exactly 300 s intervals, with the value matching a direct
-  `SELECT sum(diskSize) FROM table_partitions(...)`.
+  `SELECT sum(diskSize) FROM table_partitions(...)`. The refresh interval equals
+  QuestDB's idle-connection timeout, so the sensor repeats a failed query once on
+  a fresh connection (ADR-0016). Measured on live QuestDB 10.0.1: a connection
+  reused after 60 s of idle answers, and one reused after 300 s is already
+  closed.
 - **Diagnostics** (`diagnostics`): safe configuration (password redacted via
   `async_redact_data`), options, listener and worker snapshots (state, counters,
   ring of the last 10 delivery/schema errors), spool/dead-letter stats, table TTL

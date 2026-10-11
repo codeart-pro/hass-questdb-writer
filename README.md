@@ -449,6 +449,7 @@ resolve most cases:
 | Rows look duplicated | dedup keeps `(last_updated, entity_id)` unique |
 | Old data disappears | the **Data retention** (TTL) option drops whole day partitions |
 | Alarming values right after a restart | `events_delivered` = 0 and `seconds_since_last_delivery` = `unknown` are expected |
+| `table_size` goes unavailable and comes back | an idle connection QuestDB closed, or a restarted QuestDB — [The table size sensor is unavailable](docs/troubleshooting.md#the-table-size-sensor-is-unavailable) |
 
 ### Getting help
 
