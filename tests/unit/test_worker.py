@@ -513,9 +513,15 @@ class WriterServiceTests(unittest.TestCase):
         for index in (1, 2, 3):
             service.submit(self.event(index))
 
+        # The spool-backed values come from the cached statistics the delivery
+        # loop refreshes just after its counters, so the wait must cover both:
+        # waiting on the counters alone reads the cache in the window between
+        # them and fails on a loaded runner (CI run 38170191260).
         self.wait_for(
             lambda: service.snapshot().delivered_events == 2
             and service.snapshot().dead_lettered_events == 1
+            and service.snapshot().pending_rows == 0
+            and service.snapshot().dead_letter_rows == 1
         )
         snapshot = service.snapshot()
         self.assertEqual(snapshot.pending_rows, 0)
